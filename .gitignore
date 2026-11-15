@@ -1,0 +1,24 @@
+# Keep the repository focused on package code, tests and one usage entry.
+# Run outputs and research archives belong outside this checkout.
+/*
+!/.gitignore
+!/.gitattributes
+!/MANIFEST.in
+!/pyproject.toml
+!/README.md
+!/tir_mlir_checker/
+!/tests/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.coverage
+.DS_Store
+.env
+.env.*
+*.pem
+*.key

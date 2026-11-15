@@ -1,0 +1,13 @@
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.tir text eol=lf
+*.tvmscript text eol=lf
+*.mlir text eol=lf
+*.zip binary
+# Captured IR is a byte-exact fixture; preserve its original whitespace/hash.
+tests/fixtures/traces/** -text -whitespace
+tests/fixtures/official_tir/** -text -whitespace

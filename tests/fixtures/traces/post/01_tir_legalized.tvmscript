@@ -1,0 +1,46 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def _mhc_post_fwd_kernel(a_handle: T.handle, b_handle: T.handle, c_handle: T.handle, d_handle: T.handle, x_handle: T.handle):
+        T.func_attr({"target": T.target({"keys": [], "kind": "riscv", "tag": ""})})
+        num_tokens = T.int32()
+        a = T.match_buffer(a_handle, (num_tokens, 4, 4), strides=(16, 4, 1))
+        b = T.match_buffer(b_handle, (num_tokens, 4, 8), "bfloat16", strides=(32, 8, 1))
+        c = T.match_buffer(c_handle, (num_tokens, 4), strides=(4, 1))
+        d = T.match_buffer(d_handle, (num_tokens, 8), "bfloat16", strides=(8, 1))
+        x = T.match_buffer(x_handle, (num_tokens, 4, 8), "bfloat16", strides=(32, 8, 1))
+        # with T.block("root"):
+        T.attr(0 < num_tokens, "tl.assume", "Buffer shape should be greater than 0: shape `num_tokens` from buffer `a`, `b`, `c`, `d`, `x`")
+        bx = T.launch_thread("blockIdx.x", num_tokens)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.block("tilelang_root"):
+            T.reads(a[bx, 0, 0], c[bx, 0], b[bx, 0, 0], d[bx, 0], x[bx, 0, 0])
+            T.writes()
+            x_shared = T.alloc_buffer((4, 8), "bfloat16", scope="shared.dyn")
+            b_shared = T.alloc_buffer((4, 8), "bfloat16", scope="shared.dyn")
+            d_shared = T.alloc_buffer((8,), "bfloat16", scope="shared.dyn")
+            x_local = T.alloc_buffer((4, 8), scope="local.fragment")
+            b_local = T.alloc_buffer((4, 8), scope="local.fragment")
+            d_local = T.alloc_buffer((8,), scope="local.fragment")
+            a_local = T.alloc_buffer((4, 4), scope="local.fragment")
+            c_local = T.alloc_buffer((4,), scope="local.fragment")
+            T.copy(T.region(a[bx, 0, 0], 1, 1, 4, 4), T.region(a_local[0, 0], 2, 4, 4))
+            T.copy(T.region(c[bx, 0], 1, 1, 4), T.region(c_local[0], 2, 4))
+            T.pdl_sync()
+            for i0_h in T.serial(1, annotations={"num_stages": 2}):
+                T.copy(T.region(b[bx, 0, 0], 1, 1, 4, 8), T.region(b_shared[0, 0], 2, 4, 8), disable_tma=T.bool(True))
+                T.copy(T.region(d[bx, 0], 1, 1, 8), T.region(d_shared[0], 2, 8), disable_tma=T.bool(True))
+                T.copy(T.region(b_shared[0, 0], 1, 4, 8), T.region(b_local[0, 0], 2, 4, 8))
+                T.copy(T.region(d_shared[0], 1, 8), T.region(d_local[0], 2, 8))
+                for i_mhco in T.parallel(4):
+                    for i1_h in T.parallel(8):
+                        x_local[i_mhco, i1_h] = c_local[i_mhco] * d_local[i1_h]
+                        for i_mhci in range(4):
+                            x_local[i_mhco, i1_h] = x_local[i_mhco, i1_h] + a_local[i_mhci, i_mhco] * b_local[i_mhci, i1_h]
+                T.copy(T.region(x_local[0, 0], 1, 4, 8), T.region(x_shared[0, 0], 2, 4, 8))
+                T.copy(T.region(x_shared[0, 0], 1, 4, 8), T.region(x[bx, 0, 0], 2, 1, 4, 8), disable_tma=T.bool(True))

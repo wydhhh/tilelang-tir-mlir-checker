@@ -1,0 +1,25 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def mhc_head_compute_mix_fwd_kernel(input_mix_handle: T.handle, mhc_scale_handle: T.handle, mhc_base_handle: T.handle, output_mix_handle: T.handle):
+        num_tokens = T.int32()
+        input_mix = T.match_buffer(input_mix_handle, (num_tokens, 4), strides=(4, 1))
+        mhc_scale = T.match_buffer(mhc_scale_handle, (1,), strides=(1,))
+        mhc_base = T.match_buffer(mhc_base_handle, (4,), strides=(1,))
+        output_mix = T.match_buffer(output_mix_handle, (num_tokens, 4), strides=(4, 1))
+        # with T.block("root"):
+        bx = T.launch_thread("blockIdx.x", (num_tokens + 2 - 1) // 2)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.block("tilelang_root"):
+            T.reads(input_mix[bx * 2:bx * 2 + 2, 0:4], mhc_scale[0], mhc_base[0:4])
+            T.writes(output_mix[bx * 2:bx * 2 + 2, 0:4])
+            for i1 in T.parallel(2):
+                for j in T.parallel(4):
+                    i: T.int32 = bx * 2 + i1
+                    if i < num_tokens:
+                        output_mix[i, j] = T.sigmoid(input_mix[i, j] * mhc_scale[0] + mhc_base[j]) + T.float32(9.9999999999999995e-07)

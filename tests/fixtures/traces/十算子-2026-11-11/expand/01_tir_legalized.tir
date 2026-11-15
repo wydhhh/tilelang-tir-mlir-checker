@@ -1,0 +1,28 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def expand_to_mhc_fwd_kernel(x_handle: T.handle, o_handle: T.handle):
+        T.func_attr({"target": T.target({"host": {"keys": ["cpu"], "kind": "c", "tag": ""}, "keys": [], "kind": "riscv", "tag": ""})})
+        num_tokens = T.int32()
+        x = T.match_buffer(x_handle, (num_tokens, 16), "bfloat16", strides=(16, 1))
+        o = T.match_buffer(o_handle, (num_tokens, 3, 16), "bfloat16", strides=(48, 16, 1))
+        # with T.block("root"):
+        T.attr(0 < num_tokens, "tl.assume", "Buffer shape should be greater than 0: shape `num_tokens` from buffer `x`, `o`")
+        bx = T.launch_thread("blockIdx.x", (num_tokens + 31) // 32)
+        by = T.launch_thread("blockIdx.y", 1)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.block("tilelang_root"):
+            T.reads(x[bx * 32, 0])
+            T.writes(o[bx * 32:bx * 32 + 32, 0:3, 0:128])
+            xl = T.alloc_buffer((32, 128), "bfloat16", scope="local.fragment")
+            T.copy(T.region(x[bx * 32, 0], 1, 32, 128), T.region(xl[0, 0], 2, 32, 128))
+            for m in range(3):
+                for ti in T.parallel(32):
+                    for tj in T.parallel(128):
+                        if bx * 32 + ti < num_tokens and tj < 16:
+                            o[bx * 32 + ti, m, tj] = xl[ti, tj]

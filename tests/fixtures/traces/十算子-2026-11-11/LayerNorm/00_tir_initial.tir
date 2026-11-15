@@ -1,0 +1,42 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def main(x_handle: T.handle, weight_handle: T.handle, bias_handle: T.handle, y_handle: T.handle):
+        x = T.match_buffer(x_handle, (2, 256), strides=(256, 1))
+        weight = T.match_buffer(weight_handle, (256,), strides=(1,))
+        bias = T.match_buffer(bias_handle, (256,), strides=(1,))
+        y = T.match_buffer(y_handle, (2, 256), strides=(256, 1))
+        # with T.block("root"):
+        bx = T.launch_thread("blockIdx.x", 2)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.block("tilelang_root"):
+            T.reads(x[bx, 0:256], weight[0:256], bias[0:256])
+            T.writes(y[bx, 0:256])
+            x_local = T.alloc_buffer((1, 256), scope="local.fragment")
+            x_f32 = T.alloc_buffer((1, 256), scope="local.fragment")
+            acc = T.alloc_buffer((1,), scope="local.fragment")
+            mean_val = T.alloc_buffer((1,), scope="local.fragment")
+            rstd = T.alloc_buffer((1,), scope="local.fragment")
+            for i in T.parallel(1):
+                for j in T.parallel(256):
+                    x_local[i, j] = x[bx + i, j]
+            for i in T.parallel(1):
+                for j in T.parallel(256):
+                    x_f32[i, j] = x_local[i, j]
+            T.reduce(x_f32[0, 0:256], acc[0], "sum", 1, T.bool(True))
+            for i in T.parallel(1):
+                mean_val[i] = acc[i] / T.float32(256.0)
+            for i in T.parallel(1):
+                for j in T.parallel(256):
+                    x_f32[i, j] = T.if_then_else(j < 256, (x_f32[i, j] - mean_val[i]) * (x_f32[i, j] - mean_val[i]), T.float32(0.0))
+            T.reduce(x_f32[0, 0:256], acc[0], "sum", 1, T.bool(True))
+            for i in T.parallel(1):
+                rstd[i] = T.rsqrt(acc[i] / T.float32(256.0) + T.float32(1.0000000000000001e-05))
+            for i in T.parallel(1):
+                for j in T.parallel(256):
+                    y[bx + i, j] = (x_local[i, j] - mean_val[i]) * rstd[i] * weight[j] + bias[j]

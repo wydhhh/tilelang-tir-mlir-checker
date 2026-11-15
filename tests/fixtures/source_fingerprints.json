@@ -1,0 +1,330 @@
+{
+  "description": "Byte-identical IR fixtures; metadata reduced to loading and fingerprint fields. Historical runs are not replayed tests.",
+  "stages": [
+    {
+      "file": "traces/十算子-2026-11-11/pre_apply_mix/00_tir_initial.tir",
+      "sha256": "6e0a90b89bdba337b09f2ff81a75a483c34d1b9029f4a3c6de016b35237d6f1a",
+      "source": "project traces/十算子-2026-11-11/pre_apply_mix/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/pre_apply_mix/01_tir_legalized.tir",
+      "sha256": "61339e8f7e0c37b3ae35b5c44418501adc2b6a1c7e93ced7479563c3a02552bf",
+      "source": "project traces/十算子-2026-11-11/pre_apply_mix/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/pre_apply_mix/02_tir_optimized.tir",
+      "sha256": "61339e8f7e0c37b3ae35b5c44418501adc2b6a1c7e93ced7479563c3a02552bf",
+      "source": "project traces/十算子-2026-11-11/pre_apply_mix/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/pre_apply_mix/03_mlir_linalg.mlir",
+      "sha256": "e13568cf6de6e968ac9be78b06c5b6c642084bc3fe4292763a60bab865bdbc09",
+      "source": "project traces/十算子-2026-11-11/pre_apply_mix/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/pre_apply_mix/04_mlir_final.mlir",
+      "sha256": "b5db20666899789f4ecdd92b8c590fe8890f13df8c694d0daa49ffa86840a9eb",
+      "source": "project traces/十算子-2026-11-11/pre_apply_mix/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/post/00_tir_initial.tir",
+      "sha256": "a00de9df4629d4ae21e83087aaa4a11cdc292145491c207fe924cc32dad44507",
+      "source": "project traces/十算子-2026-11-11/post/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/post/01_tir_legalized.tir",
+      "sha256": "cc3904efe42e48d3d00be5f7f4cfe77f808b4096d479209305b0ee61e979d01e",
+      "source": "project traces/十算子-2026-11-11/post/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/post/02_tir_optimized.tir",
+      "sha256": "cc3904efe42e48d3d00be5f7f4cfe77f808b4096d479209305b0ee61e979d01e",
+      "source": "project traces/十算子-2026-11-11/post/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/post/03_mlir_linalg.mlir",
+      "sha256": "c357a5cce205b9bfdd57320b64c872753c30bd6407a8fb47d3a345c917828ac5",
+      "source": "project traces/十算子-2026-11-11/post/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/post/04_mlir_final.mlir",
+      "sha256": "affda1b6fdf2894967edd958e86519417bab97a027392996e3db5f1a356e167f",
+      "source": "project traces/十算子-2026-11-11/post/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/head_compute_mix/00_tir_initial.tir",
+      "sha256": "eef9d126639be43bba3f8710df18961c9a820d6faa607f829824d17c06f8686f",
+      "source": "project traces/十算子-2026-11-11/head_compute_mix/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/head_compute_mix/01_tir_legalized.tir",
+      "sha256": "45589a821f3366efb527d81dc0054f53503d99de641e004e570a0a8d6786dc4b",
+      "source": "project traces/十算子-2026-11-11/head_compute_mix/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/head_compute_mix/02_tir_optimized.tir",
+      "sha256": "45589a821f3366efb527d81dc0054f53503d99de641e004e570a0a8d6786dc4b",
+      "source": "project traces/十算子-2026-11-11/head_compute_mix/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/head_compute_mix/03_mlir_linalg.mlir",
+      "sha256": "3beb287e774819512dc0f1007c0b1fdce5ad438471ee1f8c7f8c1ea04803c696",
+      "source": "project traces/十算子-2026-11-11/head_compute_mix/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/head_compute_mix/04_mlir_final.mlir",
+      "sha256": "2382b804718695580f36ce20c974f3774779673bbec57861d3e153e9c180c052",
+      "source": "project traces/十算子-2026-11-11/head_compute_mix/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/normalize_weight/00_tir_initial.tir",
+      "sha256": "077f9017d8533719b9812f0a0f72f1cae59e7eaf80f94fa6bbdb3feaa7d406fe",
+      "source": "project traces/十算子-2026-11-11/normalize_weight/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/normalize_weight/01_tir_legalized.tir",
+      "sha256": "cb2c67f9a77462b91e8037fb1101dcf0eea17cc3cace5f27a8b4eda22c3973dc",
+      "source": "project traces/十算子-2026-11-11/normalize_weight/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/normalize_weight/02_tir_optimized.tir",
+      "sha256": "cb2c67f9a77462b91e8037fb1101dcf0eea17cc3cace5f27a8b4eda22c3973dc",
+      "source": "project traces/十算子-2026-11-11/normalize_weight/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/normalize_weight/03_mlir_linalg.mlir",
+      "sha256": "25480fafc16aea0c7b164e6e61e0a04a42fa51628dd9d0a80edeb0c2974337a4",
+      "source": "project traces/十算子-2026-11-11/normalize_weight/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/normalize_weight/04_mlir_final.mlir",
+      "sha256": "5061ee51b94df1aa2aa57868c1cf5e2b29377f6b0f5b8537f38d83e711d5e306",
+      "source": "project traces/十算子-2026-11-11/normalize_weight/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/expand/00_tir_initial.tir",
+      "sha256": "0a93afc3513259c1d16ef3ec362615af9dba69fa9ed797d52bd73fff35882497",
+      "source": "project traces/十算子-2026-11-11/expand/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/expand/01_tir_legalized.tir",
+      "sha256": "7044df2bc89c39d6f27d7a3187d4f83b85771bea016d4daf30295f3e86df612e",
+      "source": "project traces/十算子-2026-11-11/expand/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/expand/02_tir_optimized.tir",
+      "sha256": "7044df2bc89c39d6f27d7a3187d4f83b85771bea016d4daf30295f3e86df612e",
+      "source": "project traces/十算子-2026-11-11/expand/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/expand/03_mlir_linalg.mlir",
+      "sha256": "6e1fac731b219144b1803a4038ae5842f4d1729e6e382bb07263216dd6f570ce",
+      "source": "project traces/十算子-2026-11-11/expand/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/expand/04_mlir_final.mlir",
+      "sha256": "7581b9688c0f48b5497ef10b704b3e1d9c44ecbf311a82577435de7eeccf8dc5",
+      "source": "project traces/十算子-2026-11-11/expand/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Sum/00_tir_initial.tir",
+      "sha256": "14174a528b8451e7b6b42dbc5b2ee3e2f31702549ceeec7e56836ab570094c4a",
+      "source": "project traces/十算子-2026-11-11/Sum/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Sum/01_tir_legalized.tir",
+      "sha256": "656609d031f84ecd9c9ec1e6c7ea1cf3467ae0270db5c9798e65e1c5ecd87a2a",
+      "source": "project traces/十算子-2026-11-11/Sum/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Sum/02_tir_optimized.tir",
+      "sha256": "656609d031f84ecd9c9ec1e6c7ea1cf3467ae0270db5c9798e65e1c5ecd87a2a",
+      "source": "project traces/十算子-2026-11-11/Sum/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Sum/03_mlir_linalg.mlir",
+      "sha256": "ae7c1aa37b0a5f8a5ef4a4c7d8d59c8c8573a775cbe5a628bebc4a80e82c2591",
+      "source": "project traces/十算子-2026-11-11/Sum/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Sum/04_mlir_final.mlir",
+      "sha256": "65acbabf098b7827edfc2880a08c07fd1848cfa792c9facb990d834efb9fa16f",
+      "source": "project traces/十算子-2026-11-11/Sum/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Where/00_tir_initial.tir",
+      "sha256": "af7078d2ef29c0a62b89f78caabfac3c93fdbf66681302f92120701c1deb847e",
+      "source": "project traces/十算子-2026-11-11/Where/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Where/01_tir_legalized.tir",
+      "sha256": "fabb9d154716662b9784d7b9ef25659ac3b284de8c19a44e8bb221912bf8dc5c",
+      "source": "project traces/十算子-2026-11-11/Where/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Where/02_tir_optimized.tir",
+      "sha256": "fabb9d154716662b9784d7b9ef25659ac3b284de8c19a44e8bb221912bf8dc5c",
+      "source": "project traces/十算子-2026-11-11/Where/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Where/03_mlir_linalg.mlir",
+      "sha256": "4f68339af01fd4e1320b7bc6d7bc917f1e9ebb35f3883f5b3574d4a05de3b532",
+      "source": "project traces/十算子-2026-11-11/Where/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/Where/04_mlir_final.mlir",
+      "sha256": "4b631e657f585a757663476867d251610f556f19083f8dd82709d54ee5ccfc6d",
+      "source": "project traces/十算子-2026-11-11/Where/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/LayerNorm/00_tir_initial.tir",
+      "sha256": "3e886704fe0ab6bbc2fc0fe28b4dd2df9ca92ad94091c45d6edc3e8db39f0889",
+      "source": "project traces/十算子-2026-11-11/LayerNorm/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/LayerNorm/01_tir_legalized.tir",
+      "sha256": "46f2996926f5ac41ebdbdcc0224f838bfd3fe7491e6c1c5f7162f98a3537a2fe",
+      "source": "project traces/十算子-2026-11-11/LayerNorm/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/LayerNorm/02_tir_optimized.tir",
+      "sha256": "46f2996926f5ac41ebdbdcc0224f838bfd3fe7491e6c1c5f7162f98a3537a2fe",
+      "source": "project traces/十算子-2026-11-11/LayerNorm/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/LayerNorm/03_mlir_linalg.mlir",
+      "sha256": "7c846077ba659f93c750c56feaccbf51ca322f3651162df72cf871d88120a0b3",
+      "source": "project traces/十算子-2026-11-11/LayerNorm/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/LayerNorm/04_mlir_final.mlir",
+      "sha256": "fb4cb394578a283a03bf13a12e2895d0289880619ec8f3a1f5fd25cf1edf1ee5",
+      "source": "project traces/十算子-2026-11-11/LayerNorm/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_f32/00_tir_initial.tir",
+      "sha256": "45f716ab724a186a8b2c1b7e43a06e9d759febbc5baafc89dae9ac08ad5aa528",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_f32/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_f32/01_tir_legalized.tir",
+      "sha256": "82f3cea388a074fd580966c4159447b6e44501e8e4754084b3310d552073bb0b",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_f32/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_f32/02_tir_optimized.tir",
+      "sha256": "82f3cea388a074fd580966c4159447b6e44501e8e4754084b3310d552073bb0b",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_f32/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_f32/03_mlir_linalg.mlir",
+      "sha256": "ec3da7d73ef6166536b1c3793c61084ca598a51027312e5e0d99c32d5ad93265",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_f32/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_f32/04_mlir_final.mlir",
+      "sha256": "d407218895b3dd65e06e1db51632357789521279bbbda0a258673147f80f1eb1",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_f32/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_bf16/00_tir_initial.tir",
+      "sha256": "20b47486a0b1280f8b90e12d481a252feaca32ee80f2200b77b41cc5ff51e098",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_bf16/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_bf16/01_tir_legalized.tir",
+      "sha256": "dbebe3e752c0503b5e47540868e59792c508734545eb5ec7fc8a3d4ac1677ba2",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_bf16/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_bf16/02_tir_optimized.tir",
+      "sha256": "dbebe3e752c0503b5e47540868e59792c508734545eb5ec7fc8a3d4ac1677ba2",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_bf16/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_bf16/03_mlir_linalg.mlir",
+      "sha256": "b21a9a4ba80ba9cbdf8976108f89cd35390367ff081a86bb9bbe6af5c6f0880c",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_bf16/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/batched_transpose_bf16/04_mlir_final.mlir",
+      "sha256": "3700aa177461a47c59fd114105c134f154da7b81b38abf79631d57ba94d6f1ae",
+      "source": "project traces/十算子-2026-11-11/batched_transpose_bf16/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/sinkhorn/00_tir_initial.tir",
+      "sha256": "8ce6140fdc187db9e4e3d98b1aa3933bf95d5c33aa888212b7b8914231e978b2",
+      "source": "project traces/十算子-2026-11-11/sinkhorn/00_tir_initial.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/sinkhorn/01_tir_legalized.tir",
+      "sha256": "fcabb0e4018071601964657d7c536938bb8910ec8b77d477dabcb710b10328ab",
+      "source": "project traces/十算子-2026-11-11/sinkhorn/01_tir_legalized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/sinkhorn/02_tir_optimized.tir",
+      "sha256": "fcabb0e4018071601964657d7c536938bb8910ec8b77d477dabcb710b10328ab",
+      "source": "project traces/十算子-2026-11-11/sinkhorn/02_tir_optimized.tir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/sinkhorn/03_mlir_linalg.mlir",
+      "sha256": "33d9dd2fe713e9fda302a307cdb85fac4b4b10edf98c2c57bfbb06db64cccd3a",
+      "source": "project traces/十算子-2026-11-11/sinkhorn/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/十算子-2026-11-11/sinkhorn/04_mlir_final.mlir",
+      "sha256": "114ed23f24549bb3ec8d030b7452f4c517e1b8c5917c11fb24959a01c0e729de",
+      "source": "project traces/十算子-2026-11-11/sinkhorn/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/pre_apply_mix/00_tir_initial.tvmscript",
+      "sha256": "6e0a90b89bdba337b09f2ff81a75a483c34d1b9029f4a3c6de016b35237d6f1a",
+      "source": "project traces/pre_apply_mix/00_tir_initial.tvmscript"
+    },
+    {
+      "file": "traces/pre_apply_mix/01_tir_legalized.tvmscript",
+      "sha256": "fa1392d87b0f62e1d6513b8d5a7f00fc96d9eb53f01fe49c1c18da19cee89a0e",
+      "source": "project traces/pre_apply_mix/01_tir_legalized.tvmscript"
+    },
+    {
+      "file": "traces/pre_apply_mix/02_tir_optimized.tvmscript",
+      "sha256": "fa1392d87b0f62e1d6513b8d5a7f00fc96d9eb53f01fe49c1c18da19cee89a0e",
+      "source": "project traces/pre_apply_mix/02_tir_optimized.tvmscript"
+    },
+    {
+      "file": "traces/pre_apply_mix/03_mlir_linalg.mlir",
+      "sha256": "e13568cf6de6e968ac9be78b06c5b6c642084bc3fe4292763a60bab865bdbc09",
+      "source": "project traces/pre_apply_mix/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/pre_apply_mix/04_mlir_final.mlir",
+      "sha256": "b5db20666899789f4ecdd92b8c590fe8890f13df8c694d0daa49ffa86840a9eb",
+      "source": "project traces/pre_apply_mix/04_mlir_final.mlir"
+    },
+    {
+      "file": "traces/post/00_tir_initial.tvmscript",
+      "sha256": "a00de9df4629d4ae21e83087aaa4a11cdc292145491c207fe924cc32dad44507",
+      "source": "project traces/post/00_tir_initial.tvmscript"
+    },
+    {
+      "file": "traces/post/01_tir_legalized.tvmscript",
+      "sha256": "1a061c3d1302ab13bae0a5a498be327edd869c02a6f31efc4cf988a9ae60d343",
+      "source": "project traces/post/01_tir_legalized.tvmscript"
+    },
+    {
+      "file": "traces/post/02_tir_optimized.tvmscript",
+      "sha256": "1a061c3d1302ab13bae0a5a498be327edd869c02a6f31efc4cf988a9ae60d343",
+      "source": "project traces/post/02_tir_optimized.tvmscript"
+    },
+    {
+      "file": "traces/post/03_mlir_linalg.mlir",
+      "sha256": "c357a5cce205b9bfdd57320b64c872753c30bd6407a8fb47d3a345c917828ac5",
+      "source": "project traces/post/03_mlir_linalg.mlir"
+    },
+    {
+      "file": "traces/post/04_mlir_final.mlir",
+      "sha256": "affda1b6fdf2894967edd958e86519417bab97a027392996e3db5f1a356e167f",
+      "source": "project traces/post/04_mlir_final.mlir"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+include README.md
+recursive-include tests *.py *.md *.json *.tir *.tvmscript *.mlir *.zip
+global-exclude *.py[cod] .DS_Store
+prune **/__pycache__

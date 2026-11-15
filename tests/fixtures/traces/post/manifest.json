@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "run_id": "20261110T043526Z_57c548c_mhc_post_fwd_h8",
+  "config": {
+    "mhc": 4,
+    "hidden": 8,
+    "n_thr": 128,
+    "h_blk": 8
+  },
+  "stages": [
+    {
+      "id": "00_tir_initial",
+      "kind": "tir",
+      "file": "00_tir_initial.tvmscript",
+      "producer": "tvm.IRModule.script",
+      "sha256": "a00de9df4629d4ae21e83087aaa4a11cdc292145491c207fe924cc32dad44507",
+      "bytes": 2854,
+      "lines": 44,
+      "counts": {
+        "linalg": 0,
+        "scf": 0,
+        "truncf": 0,
+        "bf16": 0
+      },
+      "original_file": "stages/00_tir_initial/module.tvmscript"
+    },
+    {
+      "id": "01_tir_legalized",
+      "kind": "tir",
+      "file": "01_tir_legalized.tvmscript",
+      "producer": "LowerAndLegalizeForRISCV",
+      "sha256": "1a061c3d1302ab13bae0a5a498be327edd869c02a6f31efc4cf988a9ae60d343",
+      "bytes": 3058,
+      "lines": 46,
+      "counts": {
+        "linalg": 0,
+        "scf": 0,
+        "truncf": 0,
+        "bf16": 0
+      },
+      "original_file": "stages/01_tir_legalized/module.tvmscript"
+    },
+    {
+      "id": "02_tir_optimized",
+      "kind": "tir",
+      "file": "02_tir_optimized.tvmscript",
+      "producer": "OptimizeForRISCV",
+      "sha256": "1a061c3d1302ab13bae0a5a498be327edd869c02a6f31efc4cf988a9ae60d343",
+      "bytes": 3058,
+      "lines": 46,
+      "counts": {
+        "linalg": 0,
+        "scf": 0,
+        "truncf": 0,
+        "bf16": 0
+      },
+      "original_file": "stages/02_tir_optimized/module.tvmscript"
+    },
+    {
+      "id": "03_mlir_linalg",
+      "kind": "mlir",
+      "file": "03_mlir_linalg.mlir",
+      "producer": "target.build.tilelang_riscv / MLIRSourceModule.inspect_source",
+      "sha256": "c357a5cce205b9bfdd57320b64c872753c30bd6407a8fb47d3a345c917828ac5",
+      "bytes": 23697,
+      "lines": 476,
+      "counts": {
+        "linalg": 8,
+        "scf": 54,
+        "truncf": 1,
+        "bf16": 43
+      },
+      "original_file": "stages/03_mlir_linalg/module.mlir"
+    },
+    {
+      "id": "04_mlir_final",
+      "kind": "mlir",
+      "file": "04_mlir_final.mlir",
+      "producer": "tilelang.tladapter.Pipeline (pre-LLVM structured MLIR passes)",
+      "sha256": "affda1b6fdf2894967edd958e86519417bab97a027392996e3db5f1a356e167f",
+      "bytes": 9137,
+      "lines": 233,
+      "counts": {
+        "linalg": 0,
+        "scf": 53,
+        "truncf": 1,
+        "bf16": 31
+      },
+      "pipeline": [
+        "canonicalize",
+        "cse",
+        "func.func(convert-linalg-to-loops)",
+        "canonicalize",
+        "cse"
+      ],
+      "note": "Still structured MLIR (SCF/MemRef/Arith); stops before LLVM dialect conversion.",
+      "original_file": "stages/04_mlir_final/module.mlir"
+    }
+  ]
+}

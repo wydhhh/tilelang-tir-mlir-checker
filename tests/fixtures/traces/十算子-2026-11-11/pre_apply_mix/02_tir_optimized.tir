@@ -1,0 +1,36 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def _mhc_pre_apply_mix_fwd_kernel(x_handle: T.handle, mix_handle: T.handle, o_handle: T.handle):
+        T.func_attr({"target": T.target({"host": {"keys": ["cpu"], "kind": "c", "tag": ""}, "keys": [], "kind": "riscv", "tag": ""})})
+        n = T.int32()
+        x = T.match_buffer(x_handle, (n, 4, 8), "bfloat16", strides=(32, 8, 1))
+        mix = T.match_buffer(mix_handle, (n, 4), strides=(4, 1))
+        o = T.match_buffer(o_handle, (n, 8), "bfloat16", strides=(8, 1))
+        # with T.block("root"):
+        T.attr(0 < n, "tl.assume", "Buffer shape should be greater than 0: shape `n` from buffer `x`, `mix`, `o`")
+        bx = T.launch_thread("blockIdx.x", n)
+        tx = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.block("tilelang_root"):
+            T.reads(mix[bx, 0], x[bx, 0, 0], o[bx, 0])
+            T.writes()
+            mixl = T.alloc_buffer((4,), scope="local.fragment")
+            xs = T.alloc_buffer((4, 8), "bfloat16", scope="shared.dyn")
+            xl = T.alloc_buffer((4, 8), scope="local.fragment")
+            os = T.alloc_buffer((8,), "bfloat16", scope="shared.dyn")
+            ol = T.alloc_buffer((8,), scope="local.fragment")
+            T.copy(T.region(mix[bx, 0], 1, 1, 4), T.region(mixl[0], 2, 4))
+            for i0_h in T.serial(1, annotations={"num_stages": 2}):
+                T.copy(T.region(x[bx, 0, 0], 1, 1, 4, 8), T.region(xs[0, 0], 2, 4, 8), disable_tma=T.bool(True))
+                T.copy(T.region(xs[0, 0], 1, 4, 8), T.region(xl[0, 0], 2, 4, 8), disable_tma=T.bool(True))
+                T.fill(T.region(ol[0], 2, 8), 0)
+                for i_mhc in range(4):
+                    for i1_h in T.parallel(8):
+                        ol[i1_h] = ol[i1_h] + mixl[i_mhc] * xl[i_mhc, i1_h]
+                T.copy(T.region(ol[0], 1, 8), T.region(os[0], 2, 8), disable_tma=T.bool(True))
+                T.copy(T.region(os[0], 1, 8), T.region(o[bx, 0], 2, 1, 8), disable_tma=T.bool(True))

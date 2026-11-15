@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tilelang-tir-mlir-checker"
+version = "0.12.0"
+description = "Agent-facing trace inspection framework for TileLang TIR to structured MLIR"
+requires-python = ">=3.10"
+dependencies = []
+readme = "README.md"
+
+[project.optional-dependencies]
+execution = ["numpy>=1.24", "ml_dtypes>=0.5"]
+
+[project.scripts]
+tir-mlir-check = "tir_mlir_checker.cli:main"
+
+[tool.setuptools]
+packages = ["tir_mlir_checker"]

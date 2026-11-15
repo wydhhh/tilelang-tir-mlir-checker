@@ -1,0 +1,30 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def main(cond_handle: T.handle, x_handle: T.handle, y_in_handle: T.handle, out_handle: T.handle):
+        cond = T.match_buffer(cond_handle, (35,), "uint8", strides=(1,))
+        x = T.match_buffer(x_handle, (35,), strides=(1,))
+        y_in = T.match_buffer(y_in_handle, (35,), strides=(1,))
+        out = T.match_buffer(out_handle, (35,), strides=(1,))
+        # with T.block("root"):
+        bx = T.launch_thread("blockIdx.x", 2)
+        tx = T.launch_thread("threadIdx.x", 8)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.block("tilelang_root"):
+            T.reads(cond[bx * 32], x[bx * 32], y_in[bx * 32], out[bx * 32])
+            T.writes()
+            c_reg = T.alloc_buffer((32,), "uint8", scope="local.fragment")
+            x_reg = T.alloc_buffer((32,), scope="local.fragment")
+            y_reg = T.alloc_buffer((32,), scope="local.fragment")
+            T.copy(T.region(cond[bx * 32], 1, 32), T.region(c_reg[0], 2, 32))
+            T.copy(T.region(x[bx * 32], 1, 32), T.region(x_reg[0], 2, 32))
+            T.copy(T.region(y_in[bx * 32], 1, 32), T.region(y_reg[0], 2, 32))
+            for i in T.parallel(8):
+                for j in T.parallel(4):
+                    k: T.int32 = i * 4 + j
+                    x_reg[k] = T.if_then_else(c_reg[k] != T.uint8(0), x_reg[k], y_reg[k])
+            T.copy(T.region(x_reg[0], 1, 32), T.region(out[bx * 32], 2, 32))

@@ -1,0 +1,33 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def normalize_weight_kernel(topk_weights_handle: T.handle, denominator_handle: T.handle, normalized_weights_handle: T.handle):
+        T.func_attr({"target": T.target({"host": {"keys": ["cpu"], "kind": "c", "tag": ""}, "keys": [], "kind": "riscv", "tag": ""})})
+        num_tokens = T.int32()
+        topk_weights = T.match_buffer(topk_weights_handle, (num_tokens, 4), strides=(4, 1))
+        denominator = T.match_buffer(denominator_handle, (num_tokens,), strides=(1,))
+        normalized_weights = T.match_buffer(normalized_weights_handle, (num_tokens, 4), strides=(4, 1))
+        # with T.block("root"):
+        T.attr(0 < num_tokens, "tl.assume", "Buffer shape should be greater than 0: shape `num_tokens` from buffer `topk_weights`, `denominator`, `normalized_weights`")
+        bx = T.launch_thread("blockIdx.x", (num_tokens + 127) // 128)
+        tid = T.launch_thread("threadIdx.x", 128)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.block("tilelang_root"):
+            T.reads(topk_weights[bx * 128 + tid, 0:4])
+            T.writes(denominator[bx * 128 + tid], normalized_weights[bx * 128 + tid, 0:4])
+            sum = T.handle("float32", "local.var")
+            T.block_attr({"tl.local_var_init": {sum: T.float32(9.9999999999999995e-21)}})
+            weights_local = T.alloc_buffer((4,), scope="local")
+            sum_1 = T.alloc_buffer((1,), data=sum, scope="local.var")
+            if bx * 128 + tid < num_tokens:
+                for i in T.vectorized(4):
+                    weights_local[i] = topk_weights[bx * 128 + tid, i]
+                for i in T.unroll(4, annotations={"pragma_unroll_explicit": False}):
+                    sum_1[0] = sum_1[0] + weights_local[i]
+                denominator[bx * 128 + tid] = sum_1[0]
+                for i in T.vectorized(4):
+                    normalized_weights[bx * 128 + tid, i] = weights_local[i] / sum_1[0]

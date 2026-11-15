@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "name": "where",
+  "stages": [
+    {
+      "id": "00_tir_initial",
+      "file": "00_tir_initial.tir",
+      "sha256": "7e9a1f38e474bdb4560991e25156c7ff6176c3e6967c6e24e319ac8f05ebfe1f",
+      "bytes": 1551,
+      "lines": 30,
+      "origin": "actual before LowerAndLegalize"
+    },
+    {
+      "id": "01_tir_legalized",
+      "file": "01_tir_legalized.tir",
+      "sha256": "eea84ccce089f09062f5fa35518738bf20e53163be871d8892d0374c75eb6400",
+      "bytes": 1675,
+      "lines": 30,
+      "origin": "actual after LowerAndLegalize"
+    },
+    {
+      "id": "02_tir_optimized",
+      "file": "02_tir_optimized.tir",
+      "sha256": "eea84ccce089f09062f5fa35518738bf20e53163be871d8892d0374c75eb6400",
+      "bytes": 1675,
+      "lines": 30,
+      "origin": "actual after OptimizeForTarget"
+    },
+    {
+      "id": "03_mlir_linalg",
+      "file": "03_mlir_linalg.mlir",
+      "sha256": "61fcd572ff2cef6658a5b2059fc5df32ea30c4c96dae967bf09e56712faacdf1",
+      "bytes": 10758,
+      "lines": 234,
+      "origin": "actual RISC-V codegen"
+    },
+    {
+      "id": "04_mlir_final",
+      "file": "04_mlir_final.mlir",
+      "sha256": "bdc61ff8224db6ecacb1a3a9d62c114bdcf39d93dd3c43fe881a8204302fe962",
+      "bytes": 4935,
+      "lines": 133,
+      "origin": "actual pre-LLVM pipeline"
+    }
+  ],
+  "tir_objects": {
+    "00_tir_initial": {
+      "file": "00_tir_initial_object.json",
+      "sha256": "c7ec95e435e83504a2f9ed5e0038b536bf5b2e3f6b436361d02291177b4b34ed",
+      "text_sha256": "7e9a1f38e474bdb4560991e25156c7ff6176c3e6967c6e24e319ac8f05ebfe1f",
+      "tvm": {
+        "version": "0.23.dev0",
+        "git_commit": "882a774844993d103ae6e317ba3c7bbb5952b662"
+      }
+    },
+    "01_tir_legalized": {
+      "file": "01_tir_legalized_object.json",
+      "sha256": "ba20fe57d5af1dec4cb16b82c28ef0fd74e0cf6374a4e1ba86e00443655d7f50",
+      "text_sha256": "eea84ccce089f09062f5fa35518738bf20e53163be871d8892d0374c75eb6400",
+      "tvm": {
+        "version": "0.23.dev0",
+        "git_commit": "882a774844993d103ae6e317ba3c7bbb5952b662"
+      }
+    },
+    "02_tir_optimized": {
+      "file": "02_tir_optimized_object.json",
+      "sha256": "ba20fe57d5af1dec4cb16b82c28ef0fd74e0cf6374a4e1ba86e00443655d7f50",
+      "text_sha256": "eea84ccce089f09062f5fa35518738bf20e53163be871d8892d0374c75eb6400",
+      "tvm": {
+        "version": "0.23.dev0",
+        "git_commit": "882a774844993d103ae6e317ba3c7bbb5952b662"
+      }
+    }
+  },
+  "source": "Version-matched archived actual capture; revalidated for official frontend integration, 2026-11-13."
+}

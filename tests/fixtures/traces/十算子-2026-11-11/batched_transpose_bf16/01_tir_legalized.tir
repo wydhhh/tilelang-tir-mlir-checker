@@ -1,0 +1,46 @@
+# from tvm.script import ir as I
+# from tvm.script import tir as T
+
+@I.ir_module
+class Module:
+    @T.prim_func
+    def batched_transpose_kernel(x_handle: T.handle, out_handle: T.handle):
+        T.func_attr({"target": T.target({"host": {"keys": ["cpu"], "kind": "c", "tag": ""}, "keys": [], "kind": "riscv", "tag": ""})})
+        stride_x = T.int32()
+        num_batches, shape_x, shape_y = T.int32(), T.int32(), T.int32()
+        x = T.match_buffer(x_handle, (num_batches, shape_x, shape_y), "bfloat16", strides=(shape_x * stride_x, stride_x, 1))
+        out = T.match_buffer(out_handle, (num_batches, shape_y, shape_x), "bfloat16", strides=(shape_x * shape_y, shape_x, 1))
+        # with T.block("root"):
+        T.attr(0 < shape_y, "tl.assume", "Buffer shape should be greater than 0: shape `shape_y` from buffer `x`, `out`")
+        T.attr(0 < shape_x, "tl.assume", "Buffer shape should be greater than 0: shape `shape_x` from buffer `x`, `out`")
+        T.attr(0 < num_batches, "tl.assume", "Buffer shape should be greater than 0: shape `num_batches` from buffer `x`, `out`")
+        bx = T.launch_thread("blockIdx.x", shape_y // 64)
+        by = T.launch_thread("blockIdx.y", shape_x // 64)
+        bz = T.launch_thread("blockIdx.z", num_batches)
+        tid = T.launch_thread("threadIdx.x", 256)
+        ty = T.launch_thread("threadIdx.y", 1)
+        tz = T.launch_thread("threadIdx.z", 1)
+        with T.block("tilelang_root"):
+            T.reads(x[bz, by * 64 + tid // 16 * 4:by * 64 + tid // 16 * 4 + 4, bx * 64 + tid % 16 * 4:bx * 64 + tid % 16 * 4 + 4])
+            T.writes(out[bz, bx * 64:bx * 64 + 64, by * 64:by * 64 + 64])
+            out_shared = T.alloc_buffer((64, 68), "bfloat16", scope="shared.dyn")
+            tmp = T.alloc_buffer((4, 4), "bfloat16", scope="local")
+            tmp_row = T.alloc_buffer((4,), "bfloat16", scope="local")
+            T.attr(shape_x % 64 == 0, "tl.assume", "Assume: shape_x % 64 == 0")
+            T.attr(shape_y % 64 == 0, "tl.assume", "Assume: shape_y % 64 == 0")
+            T.attr(stride_x % 4 == 0, "tl.assume", "Assume: stride_x % 4 == 0")
+            for i_ in T.unroll(1, annotations={"pragma_unroll_explicit": False}):
+                for j in T.unroll(4, annotations={"pragma_unroll_explicit": False}):
+                    for k in T.vectorized(4):
+                        tmp_row[k] = x[bz, by * 64 + tid // 16 * 4 + j, bx * 64 + tid % 16 * 4 + k]
+                    for k in T.unroll(4, annotations={"pragma_unroll_explicit": False}):
+                        tmp[k, j] = tmp_row[k]
+                for j in T.unroll(4, annotations={"pragma_unroll_explicit": False}):
+                    for k in T.vectorized(4):
+                        out_shared[tid % 16 * 4 + (tid // 4 + j) % 4, tid // 16 * 4 + k] = tmp[(tid // 4 + j) % 4, k]
+            T.tvm_storage_sync("shared")
+            for i in T.parallel(64, annotations={"parallel_loop_layout": metadata["tl.Fragment"][0]}):
+                for j in T.parallel(64):
+                    out[bz, bx * 64 + i, by * 64 + j] = out_shared[i, j]
+
+# Metadata omitted. Use show_meta=True in script() method to show it.
