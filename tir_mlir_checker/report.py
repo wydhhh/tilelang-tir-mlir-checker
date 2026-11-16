@@ -13,77 +13,213 @@ def _escape(value):
     return str(value).replace("|", "\\|").replace("\n", "<br>")
 
 
+def _code(value):
+    return '`' + _escape(value).replace('`', '&#96;') + '`'
 
 
-# Keep machine diagnostics intact; the visible record has three sections.
+def _execution_summary(dynamic):
+    # A multi-output case is one execution, with several output comparisons.
+    tests = dynamic.get('tests', [])
+    runs = {}
+    for test in tests:
+        runs.setdefault((test.get('stage'), test.get('case')), []).append(test)
+    passed = sum(all(t.get('status') == 'match' for t in items) for items in runs.values())
+    failed = sum(any(t.get('status') == 'mismatch' for t in items) for items in runs.values())
+    policies = [t.get('policy', {}) for t in tests]
+    modes = {p.get('mode') for p in policies}
+    comparison = '逐位一致' if modes == {'bitwise'} else '容差一致' if modes == {'tolerance'} else '按各用例契约一致'
+    errors = [t['max_finite_abs_error'] for t in tests if t.get('max_finite_abs_error') is not None]
+    stages = list(dict.fromkeys(t.get('stage') for t in tests if t.get('stage')))
+    cases = list(dict.fromkeys(t.get('case') for t in tests if t.get('case')))
+    parts = [f'{len(cases)} 组输入 × {len(stages)} 阶段',
+             f"累计 {sum(t.get('elements', 0) for t in tests)} 个输出元素对照",
+             f"最大有限绝对误差 {max(errors) if errors else '未取得'}"]
+    text = (f'**{passed} / {len(runs)} 次{comparison}**（' + '，'.join(parts) + '）') if runs else '未执行'
+    if failed:
+        text += f'；{failed} 次模拟失败'
+    missing = len(runs) - passed - failed
+    if missing:
+        text += f'；{missing} 次未完成'
+    return dict(tests=tests, runs=runs, passed=passed, failed=failed, stages=stages,
+                cases=cases, comparison=comparison, text=text)
+
+
+def _tensor_signatures(cases):
+    groups = {}
+    for case in cases:
+        outputs, inouts = case.get('outputs', []), case.get('inouts', [])
+        signature = ', '.join(
+            f"arg{i}{'(inout)' if i in inouts else '(out)' if i in outputs else ''}: "
+            f"{arg['dtype']}[{','.join(map(str, arg['shape']))}]"
+            for i, arg in enumerate(case.get('arguments', [])))
+        groups.setdefault(signature, []).append(case['name'])
+    if len(groups) == 1:
+        return _code(next(iter(groups)))
+    return '<br>'.join(_code(signature) + '（' + _escape(', '.join(names)) + '）'
+                       for signature, names in groups.items()) or '未提供动态用例；张量信息见 facts.json'
+
+
+def _official_summary(result):
+    labels = [('tir_verification', 'TIR 00–02 读取 / SSA / 结构'),
+              ('mlir_python_verification', 'MLIR 03–04 解析 / verifier'),
+              ('mlir_verification', 'mlir-opt 03–04')]
+    states = {'passed': '通过', 'not_requested': '未执行', 'unsupported': '未完成（依赖或格式不支持）',
+              'error': '未通过（原因见诊断）', 'invalid_ir': 'IR 结构不合法'}
+    return '<br>'.join(f"{label}：{states.get(result.get(key, {}).get('status', 'not_requested'), '未完成')}"
+                       for key, label in labels)
+
+
+def _review_items(result, diagnostics):
+    items = []
+    uncertain = [item for item in diagnostics if item['status'] == 'uncertain']
+    for check in result.get('checks', []):
+        if check.get('status') == 'uncertain':
+            # The same observation can be both a check and a located finding.
+            # Prefer the finding, which has a rule name and an IR position.
+            if any(e.get('stage') == (item['location'] or {}).get('stage')
+                   and (item['location'] or {}).get('line') in e.get('lines', [])
+                   for e in check.get('evidence', []) for item in uncertain):
+                continue
+            items.append((check['id'], check.get('scope', check.get('detail', '需回查原始 IR'))))
+    seen = set()
+    for item in uncertain:
+        loc = item['location'] or {}
+        key = (item['rule_id'], loc.get('stage'), loc.get('file'), loc.get('line'), loc.get('node_path'))
+        if key not in seen:
+            seen.add(key)
+            site = f"（{loc['stage']}:{loc.get('line') or loc.get('node_path') or '?'}）" if loc.get('stage') else ''
+            items.append((item['rule_id'] + site, item['message']))
+    return items
+
+
+def _diagnostic_groups(diagnostics):
+    groups = {}
+    for item in diagnostics:
+        if item['status'] == 'uncertain':
+            continue
+        loc = item['location'] or {}
+        key = (item['rule_id'], item['status'], loc.get('stage'), loc.get('file'),
+               loc.get('line'), loc.get('node_path'), loc.get('ir_location'))
+        group = groups.setdefault(key, [])
+        group.append(item)
+    return list(groups.values())
+
+
+def _problem_card(items):
+    first = next((i for i in items if i['details'].get('first_difference')), items[0])
+    loc, details = first['location'] or {}, first['details']
+    file = Path(loc.get('file') or loc.get('stage') or '未知位置').name
+    position = f"{file}:{loc.get('line') or loc.get('node_path') or '?'}"
+    cases = list(dict.fromkeys(i['details']['case'] for i in items if i['details'].get('case')))
+    label = '❌' if first['status'] in {'mismatch', 'input_error'} else '⚠️'
+    lines = [f"> {label} **{_escape(first['message'])} [{_escape(first['rule_id'])}]**",
+             f"> - **报错阶段与位置（症状点）：** {_code(loc.get('stage') or '未定位阶段')}，{_code(position)}"]
+    if loc.get('excerpt'):
+        lines.append(f"> - **对应代码：** {_code(loc['excerpt'].strip())}")
+    if cases:
+        lines.append(f"> - **影响用例（{len(cases)} 组）：** " + ', '.join(_code(c) for c in cases))
+    difference = details.get('first_difference')
+    if difference:
+        index = ','.join(map(str, difference.get('index', [])))
+        output = f"arg{details.get('output', '?')}(out)[{index}]"
+        actual, expected = difference.get('actual', {}), difference.get('expected', {})
+        lines.append(f"> - **首个反例：** {_code(details.get('case', '未记录'))} 的 {_code(output)}："
+                     f"实际 {_code(actual.get('value', actual))}，独立参考 {_code(expected.get('value', expected))}")
+        if actual.get('bits') is not None and expected.get('bits') is not None:
+            lines.append(f"> - **原始字节（actual / expected）：** {_code(actual['bits'])} / {_code(expected['bits'])}")
+    elif details.get('index') is not None:
+        lines.append(f"> - **触发下标：** {_code(details['index'])}")
+    if first['notes']:
+        sites = []
+        for note in first['notes']:
+            p = note['location']
+            sites.append(f"{Path(p.get('file') or p.get('stage') or '未知').name}:{p.get('line') or p.get('node_path') or '?'}")
+        lines.append('> - **相关位置：** ' + ', '.join(_code(s) for s in sites))
+    lines.append('> **Agent 根因分析：** [待 Agent 沿 IR 数据流回溯确认]')
+    return lines
+
+
+# Rendering is read-only: machine statuses, counts and evidence remain intact.
 def render_report(result):
     from .diagnostics import agent_diagnostics
     from .naming import artifact_names, identify_operator
     identity = result.get('operator') or identify_operator(result)
     name = identity['name']
     names = artifact_names(name)
-    dyn = result['dynamic']
-    tests = dyn.get('tests', [])
-    passed = sum(t.get('status') == 'match' for t in tests)
-    errors = [t.get('max_finite_abs_error') for t in tests]
-    errors = [e for e in errors if e is not None]
-    functions = ', '.join(dict.fromkeys(n for items in identity['ir_functions'].values() for n in items)) or '未识别'
-    cases = dyn.get('cases', [])
-    case_summary = '; '.join(f"{c['name']}: " + ', '.join(
-        f"arg{i}={a['shape']}/{a['dtype']}" for i, a in enumerate(c['arguments'])) for c in cases)
-    if result['tool_status'] == 'mismatch':
-        conclusion = '发现具体违规或数值反例。'
-    elif result['tool_status'] != 'ok':
-        conclusion = '本次检查未完整完成，具体诊断见检查证据。'
-    elif not tests:
-        conclusion = '静态检查已完成；数值对照未执行。'
+    dynamic = result.get('dynamic', {})
+    execution = _execution_summary(dynamic)
+    diagnostics = agent_diagnostics(result)
+    reviews = _review_items(result, diagnostics)
+    problems = _diagnostic_groups(diagnostics)
+    invalid_stages = [run['stage'] for key in ('tir_verification', 'mlir_python_verification')
+                      for run in result.get(key, {}).get('runs', []) if run.get('status') == 'invalid_ir']
+    failures = [t for t in execution['tests'] if t.get('status') == 'mismatch']
+    failed_stages = list(dict.fromkeys([t['stage'] for t in failures] + invalid_stages +
+                         [i['location']['stage'] for i in diagnostics if i['status'] == 'mismatch'
+                          and i['location'] and i['location'].get('stage')]))
+    has_error = result['tool_status'] == 'mismatch' or bool(failures or invalid_stages)
+    complete = (result['tool_status'] == 'ok' and dynamic.get('status') == 'passed'
+                and dynamic.get('complete', True) and execution['runs']
+                and execution['passed'] == len(execution['runs']))
+    if has_error:
+        stage = ', '.join(failed_stages) or '检查过程中'
+        verdict = f"❌ **失败**（在 {stage} 发现错误，共 {execution['failed']} 次模拟失败）"
+    elif complete:
+        verdict = '✅ **通过**（未发现语义错误）'
+    elif result['tool_status'] == 'ok' and not dynamic.get('requested_dynamic', dynamic.get('executed')):
+        verdict = '⚪ **静态检查完成**（未执行数值模拟）'
     else:
-        conclusion = f'本次数值对照 {passed}/{len(tests)} 次通过。'
-    lines = [f'# {name} 自动检查记录', '', '## 1. 检查结论', '', conclusion,
-             f"原始状态：`{result['tool_status']}`；`{result['semantic_conclusion']}`；汇总：{_escape(result['summary'])}。",
-             '', '## 2. 测试范围与结果', '', '| 项目 | 本次结果 |', '| --- | --- |',
-             f"| 算子 / 真实IR函数 | {_escape(name)} / {_escape(functions)} |",
-             f"| 版本 / 批次 | {_escape(result['tool_version'])} / {_escape(result['input'].get('run_id') or '未记录')} |",
-             f"| 输入范围 | {_escape(case_summary or '未提供动态用例；形状和类型见证据facts.json')} |",
-             f"| 受限解释 / 数值对照 | {str(passed)+'/'+str(len(tests))+' 次通过' if tests else '未执行'}；最大有限绝对误差：{max(errors) if errors else '未取得'} |",
-             f"| 正式 MLIR verifier | {_escape(result.get('mlir_verification', {}).get('status', '未执行'))} |",
-             f"| 官方 MLIR Python 解析 / 验证 | {_escape(result.get('mlir_python_verification', {}).get('status', '未执行'))}；对象模拟与verifier分别记录 |",
-             f"| 官方 TIR 读取 / SSA与结构检查 | {_escape(result.get('tir_verification', {}).get('status', '未执行'))}；与受限节点模拟分别记录 |",
-             '| 本次真机执行 | 未执行 |',
-             '', '## 3. 问题与 Agent 判断', '',
-             'Python诊断按规则、状态和原始位置合并。',
-             '', '| 编号 / 原状态 | 发生了什么 | 关键位置 |', '| --- | --- | --- |']
-    groups = {}
-    for item in agent_diagnostics(result):
-        loc = item['location'] or {}
-        notes = [note['location'] for note in item['notes']]
-        key = (item['rule_id'], item['status'], item['message'], loc.get('stage'),
-               loc.get('file'), loc.get('line'),
-               tuple((n.get('stage'), n.get('file'), n.get('line')) for n in notes))
-        entry = groups.setdefault(key, {'item': item, 'ids': []})
-        entry['ids'].append(item['id'])
-    for entry in list(groups.values())[:15]:
-        item, ids = entry['item'], entry['ids']
-        loc = item['location'] or {}
-        def position(p):
-            return f"{p.get('stage') or Path(p.get('file') or '未知').name}:{p.get('line') or p.get('node_path') or '?'}"
-        pos = ' → '.join([position(loc)] + [position(n['location']) for n in item['notes']])
-        lines.append('| ' + ' | '.join(_escape(v) for v in
-            (','.join(ids) + ' / ' + item['status'],
-             item['message'] + '（' + item['rule_id'] + '）', pos)) + ' |')
-    if not groups:
-        lines.append('| — | 本次未发现具体自动诊断 | — |')
-    if len(groups) > 15:
-        lines.append('仅展示前15类；完整诊断及关联用例见证据。')
+        verdict = '⚠️ **检查未完成**（具体原因见问题定位）'
+    if execution['runs']:
+        summary = (f"{len(execution['stages'])} 个编译阶段、{len(execution['cases'])} 组输入，"
+                   f"共 {len(execution['runs'])} 次模拟，{execution['passed']} 次{execution['comparison']}")
+        if execution['failed']:
+            summary += f"，{execution['failed']} 次失败"
+    else:
+        summary = '本轮执行文件与结构检查，数值模拟未执行'
+    if reviews:
+        summary += f'；另有 {len(reviews)} 项需 Agent 结合原始 IR 复核'
+    functions = ', '.join(dict.fromkeys(n for ns in identity['ir_functions'].values() for n in ns)) or '未识别'
+    backends = {v.get('backend') for v in dynamic.get('stage_support', {}).values()}
+    model = '内置对象解释器（TIR 节点 / MLIR SSA 与 regions）' if backends and backends <= {'tvm_tir_nodes', 'mlir_operation_objects'} else '内置 IR 解释器（实际后端见下表）'
+    backend_names = {'tvm_tir_nodes': 'TIR 对象节点', 'mlir_operation_objects': 'MLIR 操作对象',
+                     'tir_ast': 'TIR AST', 'mlir_text': 'MLIR 文本'}
+    actual_backends = ', '.join(backend_names.get(b, str(b)) for b in sorted(backends - {None})) or '未执行'
+    cases = dynamic.get('cases', [])
+    policies = list(dict.fromkeys(
+        f"逐位比较" if t.get('policy', {}).get('mode') == 'bitwise' else
+        f"容差比较（rtol={t['policy'].get('rtol')}, atol={t['policy'].get('atol')}）" if t.get('policy', {}).get('mode') == 'tolerance'
+        else '比较策略见 result.json' for t in execution['tests']))
+    lines = [f'# {name} 自动检查记录', '', '## 1. 检查结论', '', verdict, '', summary + '。',
+             '', '## 2. 怎么查的与测试范围', '', '**检查机制：**', '',
+             '1. **读取编译快照：** 读取五阶段 IR（`00_tir_initial` → `04_mlir_final`）并核对清单指纹；新快照由 `export` 从真实编译流程截取。',
+             '2. **结构合法性：** 按配置调用 TVM 的 SSA/结构检查、MLIR 官方解析/verifier 与 `mlir-opt`，各项实际状态见下表。',
+             f'3. **独立数值模拟：** 使用{model}，对各阶段独立灌入相同输入并与独立参考比对；未执行算子真机机器码或硬件跑分。',
+             '', '| 维度 | 实际配置与结果 |', '| --- | --- |',
+             f"| 算子 / 函数 / 批次 | {_code(name)} / {_code(functions)} / {_code(result['input'].get('run_id') or '未记录')}（Checker {_code(result['tool_version'])}） |",
+             f"| 张量签名（已去重） | {_tensor_signatures(cases)} |",
+             f"| 测试用例（共 {len(cases)} 组） | {', '.join(_code(c['name']) for c in cases) or '未提供'} |",
+             f"| 官方结构验证 | {_official_summary(result)} |",
+             f"| 动态数值模拟 | {execution['text']} |",
+             f"| 解释后端 / 比较策略 | {_escape(actual_backends)} / {'；'.join(policies) or '未执行'} |"]
     supplement = result.get('agent_translation')
     if supplement is not None:
-        tests = supplement.get('tests', [])
-        passed = sum(t['status'] == 'match' for t in tests)
-        marker = '| 本次真机执行 |'
-        index = next(i for i, line in enumerate(lines) if line.startswith(marker))
-        lines.insert(index, f"| Agent翻译后样本验证（单列） | {_escape(supplement['status'])}；{passed}/{len(tests)}次比较通过；输入绑定：{_escape(supplement.get('input_binding'))} |")
-        lines += ['', '翻译代码、IR映射、输入与输出见证据中 `agent_translation/`。']
-    lines += ['', f"完整诊断、原始IR与数组：[检查证据](<{names['evidence']}>)；规则和触发条件见 `result.json`、`facts.json`、`diagnostics.txt`。", '']
+        extra = _execution_summary(supplement)
+        lines.append(f"| Agent 翻译后样本验证（单列） | {_escape(supplement['status'])}；{extra['text']}；输入绑定：{_escape(supplement.get('input_binding'))} |")
+    lines += ['', '## 3. 问题定位与 Agent 复核', '']
+    if not problems:
+        messages = result.get('diagnostics', [])
+        lines.append('**自动报错诊断：** ' + ('；'.join(_escape(m) for m in messages) if messages else '无。'))
+    for group in problems:
+        lines += _problem_card(group) + ['']
+    if reviews:
+        lines += ['', f'**待 Agent 复核项（{len(reviews)} 项）：**', '',
+                  '| 规则 / 核查内容 | Agent 复核 |', '| --- | --- |']
+        for rule, scope in reviews:
+            lines.append(f'| {_escape(rule)}：{_escape(scope)} | [待 Agent 复核] |')
+    else:
+        lines.append('**待 Agent 复核项：** 无。')
+    lines += ['', f"> 完整诊断日志、规则字典、原始 IR 与数组见[检查证据](<{names['evidence']}>)（`result.json`、`facts.json`、`diagnostics.txt`）。", '']
     return '\n'.join(lines)
 
 

@@ -54,7 +54,7 @@ def make_cases(seed):
             self.assertEqual(z.read('agent_translation/translation.py'), self.translation.read_bytes())
             arrays = np.load(io.BytesIO(z.read('agent_translation/arrays.npz')), allow_pickle=False)
             self.assertIn('case0_expected1', arrays)
-        self.assertIn('Agent翻译后样本验证', Path(r['artifacts']['report']).read_text())
+        self.assertIn('Agent 翻译后样本验证', Path(r['artifacts']['report']).read_text())
 
     def test_wrong_generated_code_has_counterexample_but_not_compiler_error(self):
         self.generated('return {1: arguments[0] * np.float32(3)}')

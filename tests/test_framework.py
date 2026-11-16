@@ -172,7 +172,7 @@ class FrameworkTests(unittest.TestCase):
             facts = json.loads(archive.read(saved["facts_member"]))
         self.assertEqual(saved["summary"], result["summary"])
         self.assertEqual(facts, result["facts"])
-        self.assertIn("## 3. 问题与 Agent 判断", Path(result["artifacts"]["report"]).read_text())
+        self.assertIn("## 3. 问题定位与 Agent 复核", Path(result["artifacts"]["report"]).read_text())
 
     def test_reports_do_not_overwrite_or_write_into_trace(self):
         target = self.copy_group()

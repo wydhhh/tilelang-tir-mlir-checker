@@ -111,7 +111,7 @@ def make_cases(seed):
             saved=json.loads(z.read('result.json'))
         self.assertEqual(saved['rule_facts'],result['rule_facts'])
         self.assertEqual(saved['schema_version'],2)
-        self.assertIn('问题与 Agent 判断',Path(result['artifacts']['report']).read_text())
+        self.assertIn('问题定位与 Agent 复核',Path(result['artifacts']['report']).read_text())
 
     def test_oob_has_buffer_loop_value_line_and_original_excerpt(self):
         result=self.run_group(mlir=COPY_MLIR.replace('memref.load %a[%i, %j]','memref.load %a[%i, %c3]'))
