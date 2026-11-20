@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.support.timeouts import regression_timeout
 from tir_mlir_checker import check
 from tir_mlir_checker.trace_io import STAGES
 
@@ -101,7 +102,7 @@ def make_cases(seed):
         return file
 
     def execute(self,trace,case,**kwargs):
-        return check(trace,mlir_backend='official',dynamic=True,case=case,stages=STAGES[3:],timeout=120,**kwargs)
+        return check(trace,mlir_backend='official',dynamic=True,case=case,stages=STAGES[3:],timeout=regression_timeout(120),**kwargs)
 
     def test_official_static_check_is_separate_from_execution(self):
         result=check(FIXTURES/'where',mlir_backend='official',out_dir=self.root/'report')
@@ -182,7 +183,7 @@ def make_cases(seed):
 
     def test_unknown_operation_and_fastmath_do_not_disappear(self):
         unknown=COPY.replace('%c = arith.constant 1.0 : f32',
-            '%c = arith.constant 1.0 : f32\n    %false = arith.constant false\n    scf.if %false {\n      %sin = math.sin %c : f32\n    }')
+            '%c = arith.constant 1.0 : f32\n    %false = arith.constant false\n    scf.if %false {\n      %atan = math.atan %c : f32\n    }')
         case=self.case('unknown')
         for name,text in (
             ('unknown_op',unknown),
@@ -217,7 +218,7 @@ def make_cases(seed):
         for name in ('where','sum'):
             with self.subTest(name=name):
                 result=check(FIXTURES/name,tir_backend='tvm',mlir_backend='official',dynamic=True,
-                    case=FIXTURES/(name+'_case.py'),timeout=180,out_dir=self.root/(name+'_report'))
+                    case=FIXTURES/(name+'_case.py'),timeout=regression_timeout(180),out_dir=self.root/(name+'_report'))
                 self.assertEqual(result['tool_status'],'ok',result['dynamic'])
                 self.assertEqual(result['tir_verification']['status'],'passed')
                 self.assertEqual(result['mlir_python_verification']['status'],'passed')

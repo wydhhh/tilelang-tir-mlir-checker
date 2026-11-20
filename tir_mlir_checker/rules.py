@@ -8,9 +8,12 @@ from __future__ import annotations
 import ast
 import re
 
-from .capabilities import TIR_CALLS, TIR_METADATA, TIR_SCALARS, MLIR_OPS, LOW_PRECISION
+from .capabilities import (AFFINE_MATMUL_MAP, MAP_ALIAS, TIR_CALLS, TIR_METADATA, TIR_SCALARS, MLIR_MATMUL,
+                           MLIR_OPS, LOW_PRECISION, TIR_BATCH_INFIX, TIR_BATCH2_TILES, TIR_INTRINSICS)
+from .capabilities import TIR_REDUCE_COMBINE
 from .diagnostics import finding, locate
 from .trace_io import STAGES
+from .tir_tail_contracts import script_tail_issues
 
 
 def name(n):
@@ -62,14 +65,21 @@ def tir_inventory(source, stage, *, backend='ast'):
                 facts['operations'].append({'line': n.lineno, 'operation': op})
                 if op not in TIR_CALLS | TIR_SCALARS | object_calls:
                     issue('CAP-TIR-CALL', n, f'未支持调用 {op}', operation=op)
+                if op == 'T.call_intrin' and (
+                        len(n.args)<2
+                        or not all(isinstance(a,ast.Constant) and isinstance(a.value,str) for a in n.args[:2])
+                        or n.args[1].value not in TIR_INTRINSICS
+                        or (n.keywords and (n.args[1].value not in TIR_BATCH2_TILES or
+                                            any(k.arg!='annotations' for k in n.keywords)))):
+                    issue('CAP-TIR-CALL', n, 'T.call_intrin 仅支持明确列出的字面量标量操作与 TileOp', operation=op)
                 if op == 'T.reduce':
                     args = [ast.unparse(a) for a in n.args]
                     facts['reductions'].append({'line': n.lineno, 'arguments': args,
                         'enclosing_loops': list(loops), 'text': ast.unparse(n)})
                     if len(n.args) != 5 or n.keywords:
                         issue('CAP-REDUCE-FORM', n, '当前支持 reduce(src,dst,kind,axis,clear) 五参数形式')
-                    elif not isinstance(n.args[2], ast.Constant) or n.args[2].value not in {'sum', 'max', 'min'}:
-                        issue('CAP-REDUCE-KIND', n, '当前归约只支持 sum/max/min', kind=args[2])
+                    elif not isinstance(n.args[2], ast.Constant) or not isinstance(n.args[2].value,str) or n.args[2].value not in TIR_REDUCE_COMBINE:
+                        issue('CAP-REDUCE-KIND', n, '归约类型须为受支持的静态字符串', kind=args[2])
                 if op == 'T.Cast':
                     facts['conversions'].append({'line': n.lineno, 'text': ast.unparse(n),
                         'target': ast.unparse(n.args[0]) if n.args else '?', 'enclosing_loops': list(loops)})
@@ -86,7 +96,8 @@ def tir_inventory(source, stage, *, backend='ast'):
                             facts.setdefault('low_precision', []).append({'line':n.lineno,'dtype':a.value,'requires':'ml_dtypes for bf16'})
                 if op == 'T.Cast' and n.args and isinstance(n.args[0], ast.Constant) and n.args[0].value in LOW_PRECISION:
                     facts.setdefault('low_precision', []).append({'line':n.lineno,'dtype':n.args[0].value})
-            if isinstance(n, ast.BinOp) and type(n.op) not in {ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod}:
+            if (isinstance(n, ast.BinOp) and type(n.op).__name__ not in TIR_BATCH_INFIX
+                    and type(n.op) not in {ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod}):
                 issue('CAP-TIR-EXPRESSION', n, '此二元运算尚未支持', operation=type(n.op).__name__)
             if isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, ast.Call):
                 call = n.value
@@ -100,6 +111,8 @@ def tir_inventory(source, stage, *, backend='ast'):
                             issue('CAP-PHYSICAL-THREAD', n, '物理线程索引参与计算；需执行一维协作调度并验证布局与 barrier', variable=name(target), status='uncertain')
             walk(ast.iter_child_nodes(n), loops)
     walk(funcs[0].body)
+    for node,op,message in script_tail_issues(funcs[0],object_backend=backend=='tvm'):
+        issue('CAP-TIR-CALL',node,message,operation=op)
     return facts, issues
 
 
@@ -118,14 +131,19 @@ def mlir_inventory(source, stage, observed, *, backend='text'):
         if op == 'scf.reduce' and re.search(r'scf.reduce\s*\(', text):
             issues.append(finding('CAP-SCF-REDUCE', 'unsupported', 'static', '带值 scf.reduce 尚未支持', stage=stage, line=line))
         if op in {'arith.extf', 'arith.truncf', 'arith.index_cast', 'arith.index_castui', 'arith.sitofp', 'arith.uitofp',
-                  'arith.extsi', 'arith.extui', 'arith.trunci', 'arith.fptosi', 'arith.bitcast'}:
+                  'arith.extsi', 'arith.extui', 'arith.trunci', 'arith.fptosi', 'arith.fptoui', 'arith.bitcast'}:
             facts['conversions'].append({'line': line, 'text': text})
         if op in {'memref.alloca', 'memref.alloc', 'linalg.fill'}:
             facts['allocations'].append({'line': line, 'text': text})
     # Headers and types must be scanned as well as executable operation names.
     for line, raw in enumerate(source.splitlines(), 1):
-        text = raw.split('//', 1)[0]
+        text = raw.split('//', 1)[0].strip()
         if 'affine_map<' in text:
+            if re.fullmatch(rf'{MAP_ALIAS}\s*=\s*{AFFINE_MATMUL_MAP}',text):
+                continue
+            if (text.split(' ',1)[0] in MLIR_MATMUL
+                    and not re.search(r'memref<[^>]*affine_map<',text)):
+                continue  # Interpreter checks the exact projections and order.
             issues.append(finding('CAP-LAYOUT', 'unsupported', 'static', 'affine layout 尚未支持', stage=stage,line=line))
     return facts, issues
 

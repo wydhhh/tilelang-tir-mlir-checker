@@ -5,6 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from tests.support.timeouts import regression_timeout
 from tir_mlir_checker import check
 from tir_mlir_checker.trace_io import STAGES
 from test_execution import write_group, np
@@ -39,7 +40,7 @@ def make_cases(seed):
 
     def run_translation(self, **kwargs):
         return check(self.trace, case=self.case, dynamic=True, translation=self.translation,
-                     timeout=kwargs.pop('timeout', 10), **kwargs)
+                     timeout=kwargs.pop('timeout', regression_timeout(10)), **kwargs)
 
     def test_supplement_pass_does_not_upgrade_unsupported_and_has_replay_evidence(self):
         self.generated()
@@ -86,7 +87,8 @@ def make_cases(seed):
 
     def test_translation_timeout_preserves_sources_and_original_status(self):
         self.generated('exec("while True: pass")')
-        r = self.run_translation(timeout=1)
+        # Leave time for the primary worker to start before the infinite translation.
+        r = self.run_translation(timeout=regression_timeout(1))
         self.assertEqual(r['tool_status'], 'unsupported')
         self.assertEqual(r['agent_translation']['failure_kind'], 'timeout')
         self.assertIn('agent_translation/translation.py', r['_evidence'])
@@ -113,7 +115,7 @@ def make_cases(seed):
         self.trace = write_group(self.root/'wrong_where', sources)
         self.generated('return {3: np.where(arguments[0] != 0, arguments[1], arguments[2])}')
         # This test deliberately declares an unfaithful translation: its match must not mask the IR error.
-        r = check(self.trace, case=CASE, dynamic=True, translation=self.translation, timeout=60)
+        r = check(self.trace, case=CASE, dynamic=True, translation=self.translation, timeout=regression_timeout(60, riscv_seconds=1800))
         self.assertEqual(r['tool_status'], 'mismatch')
         self.assertEqual(r['semantic_conclusion'], 'bounded_counterexample')
         self.assertEqual(r['agent_translation']['status'], 'passed')

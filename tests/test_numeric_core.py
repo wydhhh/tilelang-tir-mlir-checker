@@ -6,6 +6,7 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 import numpy as np
+from tests.support.timeouts import regression_timeout
 from tir_mlir_checker import check
 from tir_mlir_checker.execution import (Budget,Expr,apply,cast,dtype,make_buffers,mlir_cast,mlir_cmpi)
 from tir_mlir_checker.mlir_interpreter import MLIRInterpreter
@@ -120,7 +121,7 @@ class OfficialNumericTIRTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);trace=write_group(root/'trace',[m.tir]*3+[m.mlir]*2)
             r=check(trace,case=case_file(root/'case.py',m.cases),dynamic=True,
-                    tir_backend='tvm',mlir_backend='official',timeout=120)
+                    tir_backend='tvm',mlir_backend='official',timeout=regression_timeout(120))
             self.assertEqual(r['tool_status'],'ok',r['dynamic'])
             self.assertEqual(r['dynamic']['status'],'passed')
             self.assertFalse(any(f['status']=='unsupported' for f in r['findings']))
@@ -148,7 +149,7 @@ class OfficialNumericMLIRTests(unittest.TestCase):
             for name,source in variants.items():
                 with self.subTest(name=name):
                     trace=write_group(root/name,[m.tir]*3+[source,m.mlir])
-                    r=check(trace,case=adapter,dynamic=True,mlir_backend='official',stages=['03_mlir_linalg'],timeout=120)
+                    r=check(trace,case=adapter,dynamic=True,mlir_backend='official',stages=['03_mlir_linalg'],timeout=regression_timeout(120))
                     self.assertEqual(r['mlir_python_verification']['status'],'passed')
                     self.assertEqual(r['tool_status'],'mismatch',r['dynamic'])
                     self.assertEqual(r['semantic_conclusion'],'bounded_counterexample')
@@ -160,7 +161,7 @@ class OfficialNumericMLIRTests(unittest.TestCase):
             root=Path(temp)
             trace=write_group(root/'trace',[m.tir]*3+[m.mlir]*2)
             r=check(trace,case=case_file(root/'case.py',m.cases),dynamic=True,
-                    mlir_backend='official',stages=['03_mlir_linalg'],timeout=120)
+                    mlir_backend='official',stages=['03_mlir_linalg'],timeout=regression_timeout(120))
             self.assertEqual(r['dynamic']['status'],'passed')
             self.assertFalse(any(f['rule_id']=='CAP-LOOP-ARGS' for f in r['findings']))
 

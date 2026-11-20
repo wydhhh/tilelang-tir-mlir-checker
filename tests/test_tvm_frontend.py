@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tests.support.timeouts import regression_timeout
 from tir_mlir_checker import check
 from tir_mlir_checker.trace_io import STAGES, InputError, load_trace
 
@@ -98,7 +99,7 @@ class OfficialExecutionTests(unittest.TestCase):
             self.assertEqual([c['status'] for c in run['checks']],['passed','passed'])
 
     def test_real_where_all_five_stages(self):
-        result = check(FIXTURES/'where',tir_backend='tvm',dynamic=True,case=FIXTURES/'where_case.py',timeout=120)
+        result = check(FIXTURES/'where',tir_backend='tvm',dynamic=True,case=FIXTURES/'where_case.py',timeout=regression_timeout(120))
         self.assert_official(result)
         self.assertEqual(result['tool_status'],'ok',result['dynamic'])
         self.assertEqual(len(result['dynamic']['tests']),15)
@@ -107,7 +108,7 @@ class OfficialExecutionTests(unittest.TestCase):
         self.assertTrue(all(t['backend']=='tvm_tir_nodes' for t in nodes))
 
     def test_real_sum_all_five_stages(self):
-        result = check(FIXTURES/'sum',tir_backend='tvm',dynamic=True,case=FIXTURES/'sum_case.py',timeout=120)
+        result = check(FIXTURES/'sum',tir_backend='tvm',dynamic=True,case=FIXTURES/'sum_case.py',timeout=regression_timeout(120))
         self.assert_official(result)
         self.assertEqual(result['tool_status'],'ok',result['dynamic'])
         self.assertEqual(len(result['dynamic']['tests']),15)
@@ -134,7 +135,7 @@ class OfficialExecutionTests(unittest.TestCase):
         return trace
 
     def run_tir(self,trace,case):
-        result = check(trace,tir_backend='tvm',dynamic=True,case=case,stages=STAGES[:3],timeout=120)
+        result = check(trace,tir_backend='tvm',dynamic=True,case=case,stages=STAGES[:3],timeout=regression_timeout(120))
         self.assert_official(result)
         return result
 

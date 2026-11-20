@@ -5,17 +5,21 @@ import itertools
 import re
 import numpy as np
 
+from .capabilities import MLIR_BATCH_CASTS, MLIR_BATCH_SCALARS, MLIR_MATMUL
 from .execution import (Buffer,Budget,Expr,SemanticFault,Unsupported,apply,cast,dtype,
-                        literal,merge_trace,select,storage_type,trace_value,mlir_cast,mlir_cmpi)
+                        select,storage_type,trace_value,mlir_cast,mlir_cmpi,mlir_cmpf,
+                        MLIR_CMPF_PREDICATES,scalar_op,concrete_index)
+from .tile_ops import (accumulate_matrix, matmul_shape, matrix_transposes,
+                       parse_matrix_map, reduction_details)
 
 
 class MLIRObjectInterpreter:
     binary = {'arith.addi':'add','arith.subi':'sub','arith.muli':'mul',
               'arith.addf':'add','arith.subf':'sub','arith.mulf':'mul','arith.divf':'div',
-              'arith.andi':'and','arith.ori':'or','arith.floordivsi':'floordiv','arith.remsi':'rem'}
+              'arith.floordivsi':'floordiv','arith.remsi':'rem'}
     unary = {'arith.negf':'neg','math.exp':'exp','math.exp2':'exp2','math.rsqrt':'rsqrt',
              'math.sqrt':'sqrt','math.log':'log','math.absf':'abs','math.tanh':'tanh'}
-    casts = {'arith.index_cast','arith.index_castui','arith.extf','arith.truncf',
+    casts = MLIR_BATCH_CASTS | {'arith.index_cast','arith.index_castui','arith.extf','arith.truncf',
              'arith.sitofp','arith.uitofp','arith.extsi','arith.extui','arith.trunci'}
 
     def __init__(self,loaded,source,*,max_steps=2_000_000):
@@ -32,33 +36,38 @@ class MLIRObjectInterpreter:
         self.function = children[0].operation
         if len(self.function.regions)!=1 or len(self.function.regions[0].blocks)!=1:
             raise Unsupported('需要单个函数入口 block')
-        self.paths = {}
-        allowed = set(self.binary)|set(self.unary)|self.casts|{
+        self.paths, self.matmul_specs = {}, {}
+        allowed = set(self.binary)|set(self.unary)|self.casts|set(MLIR_BATCH_SCALARS)|MLIR_MATMUL|{
             'func.func','func.return','arith.constant','arith.cmpi','arith.cmpf','arith.select',
             'memref.alloc','memref.alloca','memref.load','memref.store','memref.dim',
-            'memref.copy','memref.subview','scf.for','scf.parallel','scf.if','scf.yield',
+            'memref.copy','memref.subview','memref.reinterpret_cast','scf.for','scf.parallel','scf.if','scf.yield',
             'scf.reduce','linalg.fill','linalg.yield'}
         with self.context:
             def inspect(op,path):
                 op=op.operation;self.paths[op]=path
                 if op.name not in allowed: raise Unsupported(f'{path}: 未支持官方 MLIR 操作 {op.name}（包括未执行分支）')
-                attrs=set(op.attributes)
+                attrs={a if isinstance(a,str) else a.name for a in op.attributes}
                 defaults={'overflowFlags':'#arith.overflow<none>','fastmath':'#arith.fastmath<none>'}
                 for key,value in defaults.items():
                     if key in attrs and str(op.attributes[key])==value: attrs.remove(key)
+                segments={'operandSegmentSizes','operand_segment_sizes'}
+                view_attrs=segments|{'static_offsets','static_sizes','static_strides'}
                 permitted={'func.func':{'sym_name','function_type','sym_visibility'},
                     'arith.constant':{'value'},'arith.cmpi':{'predicate'},'arith.cmpf':{'predicate'},
                     'scf.parallel':{'operandSegmentSizes','operand_segment_sizes'},
                     'linalg.fill':{'operandSegmentSizes','operand_segment_sizes'},
                     'memref.alloc':{'operandSegmentSizes','operand_segment_sizes','alignment'},
                     'memref.alloca':{'operandSegmentSizes','operand_segment_sizes','alignment'},
-                    'memref.subview':{'static_offsets','static_sizes','static_strides','operandSegmentSizes','operand_segment_sizes'}}.get(op.name,set())
+                    'memref.subview':view_attrs,'memref.reinterpret_cast':view_attrs}.get(op.name,set())
+                if op.name in MLIR_MATMUL: permitted=segments|{'indexing_maps','cast'}
                 if attrs-permitted:
                     raise Unsupported(f'{path}: {op.name} 未支持属性 {sorted(attrs-permitted)}')
                 if op.name=='scf.parallel' and (len(op.results) or len(op.operands)!=3*len(op.regions[0].blocks[0].arguments)):
                     raise Unsupported(f'{path}: 带归约结果的 scf.parallel 尚未支持')
                 if op.name=='scf.reduce' and (len(op.operands) or len(op.regions)):
                     raise Unsupported(f'{path}: 非空 scf.reduce 尚未支持')
+                if op.name in MLIR_MATMUL:
+                    self.matmul_specs[op]=self.inspect_matmul(op,path)
                 for ri,r in enumerate(op.regions):
                     if len(r.blocks)>1: raise Unsupported(f'{path}: 多 block/CFG 尚未支持')
                     for bi,b in enumerate(r.blocks):
@@ -91,12 +100,67 @@ class MLIRObjectInterpreter:
         return spec
 
     def layout(self,spec,buf):
-        strides,offset=spec.get_strides_and_offset()
+        try:
+            strides,offset=spec.get_strides_and_offset()
+        except ValueError as exc:
+            raise Unsupported('暂不支持非 strided memref 布局') from exc
         dynamic=self.ir.ShapedType.get_dynamic_stride_or_offset()
-        actual=tuple(v//buf.dtype.itemsize for v in buf.values.strides)
+        actual=buf.element_strides
         if offset not in (0,dynamic): raise Unsupported('非零参数/局部 offset 需显式 view 契约')
         if len(strides)!=len(actual) or any(s!=dynamic and s!=v for s,v in zip(strides,actual)):
             raise Unsupported('memref 声明 stride 与实际存储不匹配')
+
+    def view_layout(self,spec,buf):
+        if (len(spec.shape)!=len(buf.shape)
+                or any(d>=0 and d!=n for d,n in zip(spec.shape,buf.shape))
+                or storage_type(dtype(self.kind(spec.element_type)))!=storage_type(buf.dtype)):
+            raise Unsupported('视图声明 shape/dtype 与实际存储不匹配')
+        try:
+            strides,offset=spec.get_strides_and_offset()
+        except ValueError as exc:
+            raise Unsupported('暂不支持非 strided 视图布局') from exc
+        dynamic=self.ir.ShapedType.get_dynamic_stride_or_offset()
+        if (offset not in (dynamic,buf.element_offset) or len(strides)!=len(buf.element_strides)
+                or any(s not in (dynamic,v) for s,v in zip(strides,buf.element_strides))):
+            raise Unsupported('视图声明 offset/stride 与实际存储不匹配')
+
+    def decode_view_parameters(self,op,operands):
+        sentinel=self.ir.ShapedType.get_dynamic_stride_or_offset()
+        keys=('static_offsets','static_sizes','static_strides')
+        if any(k not in op.attributes for k in keys):
+            raise Unsupported('缺少 memref 视图静态参数')
+        arrays=[tuple(int(v) for v in op.attributes[k]) for k in keys]
+        values=operands[1:]
+        counts=[a.count(sentinel) for a in arrays]
+        if sum(counts)!=len(values):
+            raise Unsupported('memref 视图动态参数数量不匹配')
+        dynamic=iter(values)
+        return tuple(tuple(concrete_index(next(dynamic)) if v==sentinel else v for v in a) for a in arrays)
+
+    def inspect_matmul(self,op,path):
+        if len(op.operands)!=3 or len(op.results) or any(len(self.memtype(v.type).shape)!=2 for v in op.operands):
+            raise Unsupported(f'{path}: matmul 只支持 3 个二维 memref 和无 SSA 结果')
+        maps=None
+        if 'indexing_maps' in op.attributes:
+            maps=tuple(parse_matrix_map(str(self.ir.AffineMapAttr(m))) for m in self.ir.ArrayAttr(op.attributes['indexing_maps']))
+        ta,tb=matrix_transposes(op.name,maps)
+        if 'cast' in op.attributes and str(op.attributes['cast']) not in (
+                '#linalg.type_fn<cast_signed>','#linalg.type_fn<cast_unsigned>'):
+            raise Unsupported(f'{path}: 未知的 linalg matmul cast')
+        if len(op.regions)!=1 or len(op.regions[0].blocks)!=1:
+            raise Unsupported(f'{path}: matmul 需要单 block 标量 body')
+        block=op.regions[0].blocks[0]
+        kinds=[self.kind(self.memtype(v.type).element_type) for v in op.operands]
+        if [self.kind(v.type) for v in block.arguments]!=kinds:
+            raise Unsupported(f'{path}: matmul body 的 A/B/C 参数类型不匹配')
+        ops=[v.operation for v in block.operations]
+        pure=set(self.binary)|set(self.unary)|self.casts|set(MLIR_BATCH_SCALARS)|{
+            'arith.constant','arith.cmpi','arith.cmpf','arith.select'}
+        if (not ops or ops[-1].name!='linalg.yield' or len(ops[-1].operands)!=1
+                or self.kind(ops[-1].operands[0].type)!=kinds[-1]
+                or any(v.name not in pure or len(v.regions) for v in ops[:-1])):
+            raise Unsupported(f'{path}: matmul body 只支持纯标量指令及一个 C 类型的 yield')
+        return ta,tb,block,kinds
 
     def value(self,value,env):
         if value not in env: raise Unsupported('官方 SSA 值未绑定')
@@ -112,6 +176,8 @@ class MLIRObjectInterpreter:
             except SemanticFault as exc:
                 if exc.line==0:
                     exc.line=None;exc.args=(str(exc).removeprefix('L0: '),)
+                if exc.line is None:
+                    exc.line=location['stage_text_line']
                 exc.details.setdefault('mlir_location',location)
                 raise
             except Unsupported as exc:
@@ -123,7 +189,7 @@ class MLIRObjectInterpreter:
     def write(self,buf,index,value,op,line):
         if self.pure_only: raise Unsupported('数据相关符号分支含内存写；仅执行具体输入')
         buf.write(index,value,line)
-        if buf.position is not None: self.writer_locations[(buf.position,tuple(map(int,index)))]=self.location(op)
+        if buf.position is not None: self.writer_locations[(buf.position,buf.root_index(index))]=self.location(op)
 
     def operation(self,op,env,line):
         name=op.name
@@ -179,6 +245,20 @@ class MLIRObjectInterpreter:
             value,buf=operands
             for idx in np.ndindex(buf.shape): self.write(buf,idx,value,op,line)
             return None
+        elif name in MLIR_MATMUL:
+            if self.pure_only: raise Unsupported('数据相关符号分支含 matmul 写入')
+            a,b,c=operands
+            ta,tb,block,kinds=self.matmul_specs[op]
+            shape=matmul_shape(a,b,c,ta,tb)
+            self.reductions.append({**self.location(op),**reduction_details(c,ta,tb,False)})
+
+            def step(av,bv,acc):
+                local=dict(env)
+                local.update(zip(block.arguments,(cast(v,k) for v,k in zip((av,bv,acc),kinds))))
+                return self.sequence(block,local)[1][0]
+
+            accumulate_matrix(a,b,c,ta,tb,shape,line,step,lambda b,i,v,l:self.write(b,i,v,op,l))
+            return None
         elif name in {'memref.alloc','memref.alloca'}:
             if self.pure_only: raise Unsupported('数据相关符号分支含 allocation')
             spec=self.memtype(op.results[0].type);supplied=iter(operands)
@@ -195,23 +275,24 @@ class MLIRObjectInterpreter:
             if not 0<=axis<len(operands[0].shape): raise SemanticFault('memref.dim 轴越界',rule_id='MEM-CONTRACT',line=line or None)
             values=(np.int64(operands[0].shape[axis]),)
         elif name=='memref.subview':
-            base=operands[0];dynamic=iter(operands[1:]);sentinel=self.ir.ShapedType.get_dynamic_stride_or_offset()
-            arrays=[tuple(int(v) for v in op.attributes[k]) for k in ('static_offsets','static_sizes','static_strides')]
-            offsets,sizes,strides=[tuple(int(next(dynamic)) if v==sentinel else v for v in a) for a in arrays]
-            if next(dynamic,None) is not None: raise Unsupported('subview 动态参数不匹配')
+            base=operands[0];offsets,sizes,strides=self.decode_view_parameters(op,operands)
             spec=self.memtype(op.results[0].type);dims=spec.shape;choices=[]
+            if len(dims)>len(sizes): raise Unsupported('subview 目标 rank 大于源 rank')
             for drop in itertools.combinations([i for i,n in enumerate(sizes) if n==1],len(sizes)-len(dims)):
                 kept=[n for i,n in enumerate(sizes) if i not in drop]
                 if all(d<0 or int(d)==n for d,n in zip(dims,kept)): choices.append(drop)
             if len(choices)!=1: raise Unsupported('subview 降维映射不唯一')
             buf=base.subview(offsets,sizes,strides,choices[0])
-            if storage_type(buf.dtype)!=storage_type(dtype(self.kind(spec.element_type))): raise Unsupported('subview 不能改变 dtype')
-            declared,offset=spec.get_strides_and_offset();actual=tuple(v//buf.dtype.itemsize for v in buf.values.strides)
-            root=base
-            while hasattr(root,'_parent'): root=root._parent
-            actual_offset=(buf.values.ctypes.data-root.values.ctypes.data)//buf.dtype.itemsize
-            if offset not in (sentinel,actual_offset) or any(s!=sentinel and s!=v for s,v in zip(declared,actual)):
-                raise Unsupported('subview 声明 offset/stride 与共享存储不匹配')
+            self.view_layout(spec,buf)
+            values=(buf,)
+        elif name=='memref.reinterpret_cast':
+            base=operands[0]
+            self.view_layout(self.memtype(op.operands[0].type),base)
+            offsets,sizes,strides=self.decode_view_parameters(op,operands)
+            if len(offsets)!=1: raise Unsupported('reinterpret_cast 需要一个根存储 offset')
+            spec=self.memtype(op.results[0].type)
+            buf=base.reinterpret_cast(offsets[0],sizes,strides,element_type=self.kind(spec.element_type),line=line)
+            self.view_layout(spec,buf)
             values=(buf,)
         elif name=='arith.constant':
             attr=op.attributes['value'];kind=self.kind(op.results[0].type)
@@ -221,9 +302,12 @@ class MLIRObjectInterpreter:
                 if np.isnan(value): raise Unsupported('FloatAttr 的 NaN payload 尚未核实；不通过宿主 float 近似')
             else: raise Unsupported('仅支持标量 IntegerAttr/FloatAttr 常量')
             values=(cast(value,kind),)
+        elif name in MLIR_BATCH_SCALARS:
+            kind=self.kind(op.results[0].type)
+            types=[self.kind(arg.type) for arg in op.operands]
+            values=(scalar_op(MLIR_BATCH_SCALARS[name][0],operands,kind,types),)
         elif name in self.binary:
             kind=self.kind(op.results[0].type)
-            if name in {'arith.andi','arith.ori'} and kind!='bool': raise Unsupported('当前 andi/ori 只支持 i1')
             values=(apply(self.binary[name],operands,kind),)
         elif name in self.unary: values=(apply(self.unary[name],operands,self.kind(op.results[0].type)),)
         elif name in self.casts:
@@ -234,18 +318,8 @@ class MLIRObjectInterpreter:
             predicates=('eq','ne','slt','sle','sgt','sge','ult','ule','ugt','uge')
             values=(mlir_cmpi(predicates[predicate],*operands,self.kind(op.operands[0].type)),)
         elif name=='arith.cmpf':
-            predicates=('false','oeq','ogt','oge','olt','ole','one','ord','ueq','ugt','uge','ult','ule','une','uno','true')
-            pred=predicates[int(op.attributes['predicate'].value)];a,b=operands
-            if isinstance(a,Expr) or isinstance(b,Expr):
-                nodes=(literal(a),literal(b));value=Expr('cmpf_'+pred,nodes,'i1',merge_trace(nodes))
-            else:
-                unordered=bool(np.isnan(a) or np.isnan(b))
-                special={'true':True,'false':False,'ord':not unordered,'uno':unordered}
-                if pred in special: value=np.bool_(special[pred])
-                else:
-                    test=bool(apply({'eq':'eq','ne':'ne','lt':'lt','le':'le','gt':'gt','ge':'ge'}[pred[1:]],[a,b]))
-                    value=np.bool_(unordered or test if pred[0]=='u' else not unordered and test)
-            values=(value,)
+            pred = MLIR_CMPF_PREDICATES[int(op.attributes['predicate'].value)]
+            values=(mlir_cmpf(pred,*operands),)
         elif name=='arith.select': values=(select(*operands),)
         else: raise Unsupported(f'未支持官方 MLIR 操作 {name}')
         if len(values)!=len(op.results): raise Unsupported(f'{name} 的结果数量不匹配')
@@ -254,7 +328,7 @@ class MLIRObjectInterpreter:
 
     def run(self,buffers,symbols=None,symbolic=False):
         self.budget=buffers[0].budget if buffers else Budget(self.max_steps)
-        self.symbolic,self.pure_only,self.writer_locations=symbolic,False,{}
+        self.symbolic,self.pure_only,self.writer_locations,self.reductions=symbolic,False,{},[]
         with self.context:
             block=self.function.regions[0].blocks[0]
             if len(block.arguments)!=len(buffers): raise Unsupported('MLIR 参数数量与用例不同')
@@ -271,4 +345,5 @@ class MLIRObjectInterpreter:
                 raise Unsupported('目前只支持通过 memref 输出的 void 函数')
         return {'steps':self.budget.steps,'backend':'mlir_operation_objects',
                 'execution_model':'structured logical loops; serial enumeration of parallel iterations',
-                'location_model':'official parsed locations when checked; otherwise operation paths'}
+                'location_model':'official parsed locations when checked; otherwise operation paths',
+                'reductions':self.reductions}

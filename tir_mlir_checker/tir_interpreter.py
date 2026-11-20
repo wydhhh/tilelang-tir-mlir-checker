@@ -7,8 +7,14 @@ from contextlib import nullcontext
 
 import numpy as np
 
-from .execution import Buffer, Budget, Expr, SemanticFault, Unsupported, apply, cast, dtype, select, trace_value
+from .execution import (Buffer, Budget, Expr, LoopBreak, SemanticFault, Unsupported, apply, cast, concrete_index,
+                        dtype, extern_scalar, scalar_type, select, tir_scalar, trace_value)
 from .capabilities import TIR_METADATA as METADATA, TIR_CALLS as CALLS, TIR_SCALARS as SCALARS
+from .capabilities import TIR_BATCH_INFIX, TIR_BATCH_SCRIPT, TIR_BATCH2_SCRIPT, TIR_BATCH2_TILES, TIR_INTRINSICS
+from .capabilities import TIR_BREAKS, TIR_CUMSUM, TIR_EXTERN, TIR_EXTERN_SIGNATURES, TIR_SERIAL_MARKERS, TIR_TAIL_STATEMENTS, TIR_TUPLE
+from .tir_tail_contracts import WARP_FENCE, SWIZZLE_ATTR, constant, marker_error, script_tail_issues, tail_call, tuple_error
+from .tile_ops import (GEMM_OPS, accumulate_matrix, check_hints, copy_region, cumsum_region, fill_region, gemm_controls, reduce_region,
+                       gemm_flag, gemm_view, matmul_shape, matrix_step, reduction_details, region_descriptor)
 
 
 def name(node):
@@ -32,6 +38,10 @@ class TIRInterpreter:
             raise Unsupported("执行后端只接受一个 @T.prim_func")
         self.function = funcs[0]
         self.max_steps = max_steps
+        issues=script_tail_issues(self.function)
+        if issues:
+            node,_,message=issues[0]
+            raise Unsupported(f'L{node.lineno}: {message}')
         self._preflight(self.function.body)
         for node in self.tree.body:
             if not isinstance(node, (ast.ClassDef, ast.ImportFrom)):
@@ -64,12 +74,20 @@ class TIRInterpreter:
         for node in ast.walk(expr):
             if isinstance(node, ast.Call) and name(node.func) not in CALLS | SCALARS:
                 raise Unsupported(f"L{node.lineno}: 未支持调用 {name(node.func)}")
-            if isinstance(node,ast.BinOp) and type(node.op) not in {ast.Add,ast.Sub,ast.Mult,ast.Div,ast.FloorDiv,ast.Mod}:
+            if (isinstance(node,ast.BinOp) and type(node.op).__name__ not in TIR_BATCH_INFIX
+                    and type(node.op) not in {ast.Add,ast.Sub,ast.Mult,ast.Div,ast.FloorDiv,ast.Mod}):
                 raise Unsupported(f"L{node.lineno}: 未支持二元运算 {type(node.op).__name__}")
-            if (isinstance(node,ast.UnaryOp) and not isinstance(node.op,(ast.USub,ast.Not))):
+            if (isinstance(node,ast.UnaryOp) and not isinstance(node.op,(ast.USub,ast.Not,ast.Invert))):
                 raise Unsupported(f"L{node.lineno}: 未支持的布尔/一元表达式")
             if isinstance(node,ast.Compare) and (len(node.ops)!=1 or type(node.ops[0]) not in {ast.Eq,ast.NotEq,ast.Lt,ast.LtE,ast.Gt,ast.GtE}):
                 raise Unsupported(f"L{node.lineno}: 未支持的比较")
+            if isinstance(node,ast.Call) and name(node.func)=='T.call_intrin':
+                if (len(node.args)<2
+                        or not all(isinstance(a,ast.Constant) and isinstance(a.value,str) for a in node.args[:2])
+                        or node.args[1].value not in TIR_INTRINSICS
+                        or (node.keywords and (node.args[1].value not in TIR_BATCH2_TILES or
+                                               any(k.arg!='annotations' for k in node.keywords)))):
+                    raise Unsupported(f'L{node.lineno}: T.call_intrin 只支持明确列出的字面量标量操作与 TileOp')
             if isinstance(node,ast.Call) and name(node.func)=='T.match_buffer':
                 if any(k.arg not in {'dtype','strides'} for k in node.keywords):
                     raise Unsupported(f"L{node.lineno}: 未支持 match_buffer 附加属性")
@@ -80,6 +98,9 @@ class TIRInterpreter:
         self.env = dict(symbols or {})
         self.symbols = dict(symbols or {})
         self.reductions = []
+        self.writer_locations = {}
+        self.events,self.loop_stack = [],[]
+        self.nonunit_thread = False
         self.handles = {}
         self.shared = {}
         self.thread_active = False
@@ -88,12 +109,16 @@ class TIRInterpreter:
         if len(params) != len(buffers):
             raise Unsupported("TIR 参数数量与测试契约不同")
         self.env.update({p.arg: buf for p, buf in zip(params, buffers)})
+        for param,buf in zip(params,buffers):
+            annotation=param.annotation
+            if isinstance(annotation,ast.Call) and name(annotation.func) in {'T.Buffer','T.Tensor'} and annotation.args:
+                buf.tir_static_ones=self.static_ones(annotation.args[0],buf.shape)
         self._bind_dynamic_shapes(buffers)
         self._sequence(self.function.body)
         model = ("logical blocks; one-dimensional cooperative thread simulation"
                  if self.used_physical_threads else "logical_blocks; unused physical thread axes only")
         return {"steps": self.budget.steps, "execution_model": model,
-                "reductions": self.reductions}
+                "reductions": self.reductions, "node_events": self.events}
 
     def _bind_dynamic_shapes(self, buffers):
         # Only direct dimension symbols can be inferred; expressions require
@@ -153,6 +178,12 @@ class TIRInterpreter:
                     self.physical(tail,target,extent)
                     return
                 self.env[target] = np.int64(0)
+                if extent!=1:
+                    old=self.nonunit_thread
+                    self.nonunit_thread=True
+                    try: self._sequence(tail)
+                    finally: self.nonunit_thread=old
+                    return
                 continue
             self.statement(stmt)
 
@@ -205,8 +236,17 @@ class TIRInterpreter:
                 if name(node.value.func) == "T.attr" and len(node.value.args) > 1 and isinstance(node.value.args[1], ast.Constant) and node.value.args[1].value == "tl.assume":
                     if not bool(self.eval(node.value.args[0])):
                         raise Unsupported(f"L{node.lineno}: 测试不满足 TIR assumption")
+                if (name(node.value.func)=='T.attr' and len(node.value.args)==3
+                        and constant(node.value.args[1])==SWIZZLE_ATTR and tail_call(node.value.args[2])):
+                    self.tail_statement(node.value.args[2],metadata=True)
                 return
-            self.eval(node.value)
+            value=node.value
+            if isinstance(value,ast.Call) and name(value.func)=='T.evaluate':
+                if len(value.args)!=1 or value.keywords:
+                    raise Unsupported('T.evaluate 需要一个表达式')
+                value=value.args[0]
+            if not self.tail_statement(value):
+                self.eval(value)
         elif isinstance(node, ast.For):
             if node.orelse:
                 raise Unsupported("不支持循环 else")
@@ -214,13 +254,25 @@ class TIRInterpreter:
             if not isinstance(call, ast.Call) or name(call.func) not in {"range", "T.serial", "T.parallel", "T.unroll", "T.vectorized"}:
                 raise Unsupported("不支持的循环迭代器")
             bounds = [int(self.eval(v)) for v in call.args]
-            region=self.budget.new_region() if name(call.func)=='T.parallel' else None
-            for value in range(*bounds):
-                self.assign(node.target, np.int64(value), node.lineno)
-                with self.budget.iteration(region,value) if region is not None else nullcontext():
-                    with self.budget.at('loop', node.lineno, variable=name(node.target), value=value,
-                                        bounds=bounds):
-                        self._sequence(node.body)
+            kind=name(call.func)
+            region=self.budget.new_region() if kind=='T.parallel' else None
+            target=name(node.target)
+            if not isinstance(node.target,ast.Name): raise Unsupported('For 循环变量必须是名称')
+            missing=object()
+            old=self.env.get(target,missing)
+            self.loop_stack.append(kind)
+            try:
+                for value in range(*bounds):
+                    self.assign(node.target, np.int64(value), node.lineno)
+                    with self.budget.iteration(region,value) if region is not None else nullcontext():
+                        with self.budget.at('loop', node.lineno, variable=target,value=value,bounds=bounds):
+                            self._sequence(node.body)
+            except LoopBreak:
+                if kind not in {'T.serial','range'}: raise
+            finally:
+                self.loop_stack.pop()
+                if old is missing: self.env.pop(target,None)
+                else: self.env[target]=old
         elif isinstance(node, ast.If):
             cond = self.eval(node.test)
             if isinstance(cond, Expr):
@@ -260,7 +312,12 @@ class TIRInterpreter:
         return buf, tuple(self.eval(i) for i in elements)
 
     def eval(self, node):
-        value = self._eval(node)
+        try:
+            value = self._eval(node)
+        except SemanticFault as exc:
+            if exc.line is None:
+                exc.line = node.lineno
+            raise
         if isinstance(node, (ast.BinOp, ast.UnaryOp, ast.Compare, ast.Call)):
             return trace_value(value, ast.unparse(node)[:160], node.lineno,
                                name(node.func) if isinstance(node, ast.Call) else type(node).__name__)
@@ -284,10 +341,16 @@ class TIRInterpreter:
             buf, idx = self.address(node)
             return buf.read(idx, node.lineno)
         if isinstance(node, ast.BinOp):
+            if type(node.op).__name__ in TIR_BATCH_INFIX:
+                a,b = self.eval(node.left),self.eval(node.right)
+                return tir_scalar(TIR_BATCH_INFIX[type(node.op).__name__], [a,b], scalar_type(a))
             op = {ast.Add: "add", ast.Sub: "sub", ast.Mult: "mul", ast.Div: "div", ast.FloorDiv: "floordiv", ast.Mod: "mod"}.get(type(node.op))
             if op is None:
                 raise Unsupported("不支持的二元运算")
             return apply(op, [self.eval(node.left), self.eval(node.right)])
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Invert):
+            value = self.eval(node.operand)
+            return tir_scalar('tir.bitwise_not', [value], scalar_type(value))
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
             return apply("neg", [self.eval(node.operand)])
         if isinstance(node, ast.Compare) and len(node.ops) == 1:
@@ -313,19 +376,64 @@ class TIRInterpreter:
 
     def call(self, node):
         function = name(node.func)
+        tail=tail_call(node)
+        if tail is not None:
+            op,args,target=tail
+            if op!=TIR_EXTERN:
+                raise Unsupported(f'{op}: 只能作为语句使用')
+            symbol=constant(args[0]) if args else None
+            signature=TIR_EXTERN_SIGNATURES.get(symbol)
+            if node.keywords or signature is None or target!=signature[0] or len(args)!=1+len(signature[1]):
+                raise Unsupported(f'tir.call_extern {symbol!r}: 未支持的符号、参数或返回 dtype')
+            values=[self.eval(a) for a in args[1:]]
+            return extern_scalar(symbol,values,target,[scalar_type(v) for v in values])
         if function in {'T.min','T.max'}:
             values=[self.eval(a) for a in node.args]
             if len(values)!=2:raise Unsupported('min/max 需要两个标量')
             if not self.symbolic and any((np.asarray(v).dtype.kind=='f' or np.asarray(v).dtype.name=='bfloat16') and (np.isnan(v) or (v==0 and np.signbit(v))) for v in values):
                 raise Unsupported('min/max NaN/负零规则尚未核实')
             return apply(function[2:],values)
-        if function == 'T.infinity':
-            if len(node.args)!=1 or node.keywords:
-                raise Unsupported('T.infinity 需要一个显式浮点类型')
-            kind=self.eval(node.args[0])
-            if dtype(kind).kind!='f' and dtype(kind).name!='bfloat16':
-                raise Unsupported('T.infinity 需要支持无穷大的浮点类型')
-            return cast(np.inf,kind)
+        if function == 'T.call_intrin':
+            kind, operation = (arg.value for arg in node.args[:2])  # checked in preflight
+            if operation in TIR_BATCH2_TILES or operation == 'tl.tileop.region':
+                if kind != 'handle':
+                    raise Unsupported('TileOp call_intrin 需要 handle 类型')
+                if operation == 'tl.tileop.region':
+                    return self.explicit_tile_region(node.args[2:])[0]
+                return self.tile_call(operation,node,node.args[2:],raw=True)
+            values = [self.eval(a) for a in node.args[2:]]
+            if operation in ('tl.ieee_fdiv','tl.ieee_fmaf') and (not isinstance(node.args[-1],ast.Constant) or node.args[-1].value!='rn'):
+                raise Unsupported(f'L{node.lineno}: {operation} 需要字面量舍入模式 rn')
+            return tir_scalar(operation, values, kind)
+        if function in TIR_BATCH_SCRIPT:
+            operation = TIR_BATCH_SCRIPT[function]
+            values = [self.eval(a) for a in node.args]
+            if operation == 'tir.reinterpret':
+                if len(values)==1 and len(node.keywords)==1 and node.keywords[0].arg=='dtype':
+                    target = self.eval(node.keywords[0].value)
+                elif len(values)==2 and not node.keywords:
+                    value,target = values if isinstance(values[1],str) else tuple(reversed(values))
+                    values = [value]
+                else:
+                    raise Unsupported('T.reinterpret 需要一个值和一个类型字符串')
+                if not isinstance(target,str):
+                    raise Unsupported('T.reinterpret 目标需要类型字符串')
+                return tir_scalar(operation, values, target)
+            if node.keywords:
+                raise Unsupported(f'{function} 不支持附加属性')
+            if operation == 'tl.infinity':
+                if len(values)!=1 or not isinstance(values[0],str):
+                    raise Unsupported('T.infinity 需要一个显式浮点类型')
+                return tir_scalar(operation, values, values[0])
+            if not values:
+                raise Unsupported(f'{function} 需要标量输入')
+            count = {'tl.ieee_fdiv': 2, 'tl.ieee_fmaf': 3}.get(operation)
+            if count and len(values)==count:
+                values.append('rn')
+            elif count and (not isinstance(node.args[-1],ast.Constant) or node.args[-1].value!='rn'):
+                raise Unsupported(f'{function} 需要字面量舍入模式 rn')
+            kind = 'bool' if operation in ('tir.isnan','tir.isfinite') else scalar_type(values[0])
+            return tir_scalar(operation, values, kind)
         if function in {'T.exp','T.exp2','T.rsqrt','T.sqrt','T.sigmoid'}:
             value=self.eval(node.args[0])
             kind=value.type if isinstance(value,Expr) else str(np.asarray(value).dtype)
@@ -360,6 +468,7 @@ class TIRInterpreter:
             actual = tuple(int(i // buf.dtype.itemsize) for i in buf.values.strides)
             if strides is not None and tuple(strides) != actual:
                 raise Unsupported("目前仅执行匹配的连续布局")
+            buf.tir_static_ones=self.static_ones(node.args[1],buf.shape)
             return buf
         if function == "T.alloc_buffer":
             shape = tuple(int(i) for i in self.eval(node.args[0]))
@@ -378,19 +487,18 @@ class TIRInterpreter:
                 return self.shared[node.lineno]
             buf=Buffer(np.empty(shape, dtype=dtype(requested)), initialized=False,
                           symbolic=self.symbolic, budget=self.budget, allocation_line=node.lineno)
+            buf.tir_static_ones=self.static_ones(node.args[0],shape)
             if initial is not None:
                 for idx in np.ndindex(shape):buf.write(idx,initial,node.lineno)
             if self.thread_active and scope.startswith('shared'):
                 self.shared[node.lineno]=buf
             return buf
         if function == "T.region":
-            if not isinstance(node.args[0], ast.Subscript):
-                raise Unsupported("T.region 需要 buffer 标量起点")
-            buf, origin = self.address(node.args[0])
-            sizes = tuple(int(self.eval(n)) for n in node.args[2:])
-            if len(sizes) != len(buf.shape):
-                raise Unsupported("T.region rank 不匹配")
-            return (buf, origin, sizes)
+            if node.keywords: raise Unsupported('T.region 不接受关键字参数')
+            return self.explicit_tile_region(node.args)[0]
+        if function in TIR_BATCH2_SCRIPT:
+            return self.tile_call(TIR_BATCH2_SCRIPT[function],node,node.args,
+                                  raw=function in {'T.gemm','T.gemm_py','T.wgmma_gemm'} and len(node.args)>=10)
         if function == "T.copy":
             if len(node.args)!=2 or any(k.arg!='disable_tma' or not bool(self.eval(k.value)) for k in node.keywords):
                 raise Unsupported(f'L{node.lineno}: 未支持 copy 属性')
@@ -415,11 +523,6 @@ class TIRInterpreter:
                 values.append((b,value))
             for idx,value in values:target[0].write(idx,value,node.lineno)
             return None
-        if function == "T.fill":
-            buf,origin,shape=self.as_region(self.eval(node.args[0]));value=self.eval(node.args[1])
-            for index in np.ndindex(shape):
-                buf.write(tuple(a+b for a,b in zip(origin,index)),value,node.lineno)
-            return None
         if function == "T.assume":
             if not bool(self.eval(node.args[0])):
                 raise Unsupported("测试不满足 T.assume")
@@ -430,6 +533,204 @@ class TIRInterpreter:
         if isinstance(value,Buffer):return value,(0,)*len(value.shape),value.shape
         if isinstance(value,tuple) and len(value)==3 and isinstance(value[0],Buffer):return value
         raise Unsupported('需要 buffer 或矩形 region')
+
+    def tail_statement(self,node,metadata=False):
+        tail=tail_call(node)
+        if tail is None or tail[0] not in TIR_TAIL_STATEMENTS:
+            return False
+        op,args,_=tail
+        self.budget.tick()
+        if op in TIR_BREAKS:
+            if args or self.thread_active or not self.loop_stack or self.loop_stack[-1] not in {'T.serial','range'}:
+                raise Unsupported(f'{op}: 只能跳出最内层串行 For')
+            raise LoopBreak()
+        if op in TIR_SERIAL_MARKERS or op==TIR_TUPLE:
+            vals=[constant(a) for a in args]
+            if self.thread_active and op in TIR_SERIAL_MARKERS:
+                raise Unsupported(f'{op}: 物理线程执行中不能忽略串行提示')
+            pointer=(op==WARP_FENCE and len(args)==4 and isinstance(args[1],ast.Attribute)
+                     and args[1].attr=='data' and isinstance(self.eval(args[1].value),Buffer))
+            err=tuple_error(vals,metadata) if op==TIR_TUPLE else marker_error(op,vals,pointer=pointer)
+            if err: raise Unsupported(err)
+            self.events.append({'stage_text_line':node.lineno,'action':'serial_noop','operation':op})
+            if len(self.events)>128: self.events.pop(0)
+            return True
+        if op==TIR_CUMSUM:
+            if self.thread_active or self.nonunit_thread:
+                raise Unsupported('cumsum 仅支持非协作、串行区域')
+            if len(args)!=4: raise Unsupported('cumsum 需要 4 个参数')
+            dim,reverse=map(constant,args[2:])
+            if type(dim) is not int or type(reverse) not in (bool,int) or reverse not in (0,1):
+                raise Unsupported('cumsum 需要静态整数 dim 与布尔 reverse')
+
+            def write(buf,index,value,line):
+                buf.write(index,value,line)
+                if buf.position is not None:
+                    self.writer_locations[(buf.position,buf.root_index(index))] = {
+                        'stage_text_line':line,'operation':op}
+            cumsum_region(*(self.tile_region(a)[0] for a in args[:2]),dim,bool(reverse),node.lineno,write,
+                          lambda details:self.reductions.append({'line':node.lineno,**details}))
+            return True
+        return False
+
+    @staticmethod
+    def literal_int(node):
+        if isinstance(node,ast.Constant) and type(node.value) is int:
+            return node.value
+        if isinstance(node,ast.UnaryOp) and isinstance(node.op,ast.USub):
+            v = TIRInterpreter.literal_int(node.operand)
+            return -v if v is not None else None
+        if (isinstance(node,ast.Call) and name(node.func) in SCALARS
+                and name(node.func).startswith(('T.int','T.uint')) and len(node.args)==1 and not node.keywords):
+            return TIRInterpreter.literal_int(node.args[0])
+        return None
+
+    @staticmethod
+    def literal_flag(node):
+        if isinstance(node,ast.Call) and name(node.func)=='T.bool' and len(node.args)==1 and not node.keywords:
+            node=node.args[0]
+        return isinstance(node,ast.Constant) and type(node.value) is bool or TIRInterpreter.literal_int(node) in (0,1)
+
+    def static_ones(self,spec,shape):
+        if not isinstance(spec,(ast.Tuple,ast.List)) or len(spec.elts)!=len(shape):
+            return ()
+        return tuple(i for i,(v,n) in enumerate(zip(spec.elts,shape)) if n==1 and self.literal_int(v)==1)
+
+    def tile_region(self,node):
+        if isinstance(node,ast.Subscript):
+            buf = self.eval(node.value)
+            if not isinstance(buf,Buffer): raise Unsupported('TileOp 需要 buffer')
+            axes = node.slice.elts if isinstance(node.slice,ast.Tuple) else [node.slice]
+            if len(axes)!=len(buf.shape): raise Unsupported('TileOp region rank 不匹配')
+            origins,shape,ones = [],[],[]
+            for i,(axis,bound) in enumerate(zip(axes,buf.shape)):
+                if isinstance(axis,ast.Slice):
+                    a = concrete_index(self.eval(axis.lower)) if axis.lower is not None else 0
+                    b = concrete_index(self.eval(axis.upper)) if axis.upper is not None else bound
+                    if axis.step is not None and self.literal_int(axis.step)!=1:
+                        raise Unsupported('TileOp region 切片只支持静态单位步长')
+                    n = b-a
+                    static_lo=axis.lower is None or self.literal_int(axis.lower) is not None
+                    static_hi=(i in getattr(buf,'tir_static_ones',()) if axis.upper is None
+                               else self.literal_int(axis.upper) is not None)
+                    if n==1 and static_lo and static_hi:
+                        ones.append(i)
+                elif isinstance(axis,ast.Call) and name(axis.func)=='T.Ramp':
+                    if len(axis.args)!=3 or axis.keywords or self.literal_int(axis.args[1])!=1:
+                        raise Unsupported('TileOp region 仅支持单位步长 Ramp')
+                    a,n = concrete_index(self.eval(axis.args[0])), self.literal_int(axis.args[2])
+                    if n is None or n <= 0: raise Unsupported('Ramp lanes 需要静态正整数')
+                    if n==1: ones.append(i)
+                else:
+                    a,n = concrete_index(self.eval(axis)),1
+                    ones.append(i)
+                origins.append(a);shape.append(n)
+            return region_descriptor(buf,origins,shape),tuple(ones)
+        if isinstance(node,ast.Call) and name(node.func)=='T.region' and not node.keywords:
+            return self.explicit_tile_region(node.args)
+        if (isinstance(node,ast.Call) and name(node.func)=='T.call_intrin' and len(node.args)>=2
+                and isinstance(node.args[1],ast.Constant) and node.args[1].value=='tl.tileop.region'):
+            if node.keywords or not isinstance(node.args[0],ast.Constant) or node.args[0].value!='handle':
+                raise Unsupported('非法 tl.tileop.region 签名')
+            return self.explicit_tile_region(node.args[2:])
+        value=self.eval(node)
+        return region_descriptor(*self.as_region(value)),getattr(value,'tir_static_ones',())
+
+    def explicit_tile_region(self,args):
+        if len(args)<2 or not isinstance(args[0],ast.Subscript) or self.literal_int(args[1]) not in (1,2,3):
+            raise Unsupported('T.region 需要 buffer 起点和静态 access mask')
+        (buf,origin,lanes),_ = self.tile_region(args[0])
+        axes = args[0].slice.elts if isinstance(args[0].slice,ast.Tuple) else [args[0].slice]
+        if len(args)-2 != len(axes):
+            raise Unsupported('T.region rank 与显式 extent 不符')
+        sizes,ones = [],[]
+        for i,(axis,n) in enumerate(zip(axes,args[2:])):
+            if isinstance(axis,ast.Slice):
+                raise Unsupported('T.region 起点只允许标量下标或 Ramp')
+            if isinstance(axis,ast.Call) and name(axis.func)=='T.Ramp':
+                explicit=self.literal_int(n)
+                if explicit is not None and explicit!=lanes[i]:
+                    raise Unsupported('T.region Ramp lanes 与显式 extent 不符')
+                sizes.append(lanes[i])
+                if lanes[i]==1: ones.append(i)
+            else:
+                sizes.append(self.eval(n))
+                if self.literal_int(n)==1: ones.append(i)
+        return region_descriptor(buf,origin,sizes),tuple(ones)
+
+    def tile_call(self,op,node,args,*,raw=False):
+        line = node.lineno
+
+        def write(buf,index,value,line):
+            if self.thread_active:
+                raise Unsupported('Batch 2 TileOp 仅支持串行区域执行')
+            buf.write(index,value,line)
+            if buf.position is not None:
+                self.writer_locations[(buf.position,buf.root_index(index))] = {
+                    'stage_text_line':line,'operation':op}
+
+        keywords = {k.arg:k.value for k in node.keywords}
+        if None in keywords or len(keywords)!=len(node.keywords):
+            raise Unsupported('TileOp 不支持动态或重复关键字')
+        hints = {}
+        if 'annotations' in keywords:
+            obj = keywords.pop('annotations')
+            if not isinstance(obj,ast.Dict):
+                raise Unsupported('TileOp annotations 必须为字面量字典')
+            for key,val in zip(obj.keys,obj.values):
+                if not isinstance(key,ast.Constant) or not isinstance(key.value,str) or key.value in hints:
+                    raise Unsupported('TileOp annotations 需要唯一的字符串键')
+                hints[key.value] = self.eval(val) if key.value in {
+                    'coalesced_width','eviction_policy','is_wgmma','is_tcgen05','use_2cta','disable_tma',
+                    'no_implicit_async_commit_wait','is_async_copy','is_tma_copy'} else None
+        if op == 'tl.tileop.fill' and len(args)==2 and not keywords:
+            check_hints(op,hints)
+            fill_region(self.tile_region(args[0])[0],self.eval(args[1]),line,write)
+            return None
+        if op in {'tl.tileop.async_copy','tl.tileop.tma_copy'} and len(args)==2:
+            for key,val in keywords.items():
+                if key not in hints:
+                    hints[key] = self.eval(val) if key in {'coalesced_width','eviction_policy'} else None
+            check_hints(op,hints)
+            copy_region(*(self.tile_region(a)[0] for a in args),line,write)
+            return None
+        if op not in GEMM_OPS or len(args)<3:
+            raise Unsupported(f'{op}: 非法 TileOp 参数列表')
+        if self.thread_active:
+            raise Unsupported('Batch 2 GEMM 仅支持串行区域执行')
+        check_hints(op,hints)
+        regions,ones = zip(*(self.tile_region(x) for x in args[:3]))
+        a,b,c = (gemm_view(reg,drops) for reg,drops in zip(regions,ones))
+        if raw:
+            if len(args) not in (10,19) or keywords:
+                raise Unsupported('GEMM 仅支持 10 参数降级形式或 19 参数序列化形式')
+            if (not all(self.literal_flag(args[i]) for i in (3,4))
+                    or self.literal_int(args[8]) is None
+                    or len(args)==19 and any(self.literal_int(args[i]) is None for i in (14,15,16))):
+                raise Unsupported('GEMM transpose/policy/k_pack/wg_wait/mbar 需要支持的静态值')
+            ta,tb,dims,clear = gemm_controls([self.eval(v) for v in args[3:]],regions)
+        else:
+            fields = ('transpose_A','transpose_B','policy','clear_accum','k_pack','mbar')
+            if len(args)>3+len(fields) or any(f not in fields for f in keywords):
+                raise Unsupported('未知 GEMM 关键字或参数数量')
+            for key,val in zip(fields,args[3:]):
+                if key in keywords: raise Unsupported(f'GEMM 重复参数 {key}')
+                keywords[key] = val
+            if (any(key in keywords and not self.literal_flag(keywords[key]) for key in fields[:2])
+                    or 'policy' in keywords and self.literal_int(keywords['policy']) not in (0,1,2,3)
+                    or 'k_pack' in keywords and self.literal_int(keywords['k_pack'])!=1
+                    or 'mbar' in keywords and not (isinstance(keywords['mbar'],ast.Constant) and
+                                                     keywords['mbar'].value is None)):
+                raise Unsupported('GEMM 需要静态 transpose/policy、k_pack=1 和无 mbar')
+            ta,tb,clear = (gemm_flag(self.eval(keywords[k]),k) if k in keywords else False
+                            for k in ('transpose_A','transpose_B','clear_accum'))
+            dims = None
+        shape = matmul_shape(a,b,c,ta,tb,dims)
+        step = matrix_step(a,b,c)
+        self.reductions.append({'line':line,**reduction_details(c,ta,tb,clear)})
+        if clear: fill_region(regions[2],0,line,write)
+        accumulate_matrix(a,b,c,ta,tb,shape,line,step,write)
+        return None
 
     def physical(self, statements, variable, extent):
         """Cooperative SPMD with private local allocations and block shared data.
@@ -545,46 +846,10 @@ class TIRInterpreter:
     def reduce(self, node):
         if len(node.args) != 5 or node.keywords:
             raise Unsupported(f'L{node.lineno}: 需要五参数 T.reduce')
-        source, origin, shape = self.reduction_region(node.args[0])
-        target, dest, dest_shape = self.reduction_region(node.args[1])
-        kind, axis, clear = [self.eval(a) for a in node.args[2:]]
-        if kind not in {'sum', 'max', 'min'} or not isinstance(clear, (bool, np.bool_)):
-            raise Unsupported(f'L{node.lineno}: 未支持的归约种类或 clear 属性')
-        if self.symbolic and kind in {'max', 'min'}:
-            raise Unsupported(f'L{node.lineno}: max/min 的符号等价需补充 NaN/负零前提，当前只支持受限数值检查')
-        if not isinstance(axis, (int, np.integer)):
+        source,target = map(self.reduction_region,node.args[:2])
+        kind,axis,clear = [self.eval(a) for a in node.args[2:]]
+        if not isinstance(axis,(int,np.integer)) or isinstance(axis,(bool,np.bool_)):
             raise Unsupported(f'L{node.lineno}: 归约轴必须为整数')
-        axis = int(axis)
-        if not 0 <= axis < len(shape):
-            raise Unsupported(f'L{node.lineno}: 归约轴 {axis} 超出 rank {len(shape)}')
-        out_shape = shape[:axis] + shape[axis + 1:]
-        if out_shape != dest_shape or source.dtype != target.dtype or source is target:
-            raise Unsupported(f'L{node.lineno}: 归约输出区域/类型不匹配或存在源目标别名')
-        self.reductions.append({'line': node.lineno, 'kind': kind, 'axis': axis,
-            'clear': bool(clear), 'accumulator_dtype': str(target.dtype),
-            'source': source.name, 'source_origin': list(origin), 'source_shape': list(shape),
-            'destination': target.name, 'destination_origin': list(dest),
-            'order': 'increasing_axis_index',
-            'scope': 'max/min 的浮点 NaN 与负零规则未核实，数值执行遇到这些值返回 unsupported'})
-        if target.dtype.kind not in 'fiu':
-            raise Unsupported(f'L{node.lineno}: 不支持该归约 dtype')
-        if kind == 'sum':
-            initial = np.asarray(0, dtype=target.dtype)[()]
-        elif target.dtype.kind == 'f':
-            initial = np.asarray(-np.inf if kind == 'max' else np.inf, dtype=target.dtype)[()]
-        else:
-            limits = np.iinfo(target.dtype)
-            initial = np.asarray(limits.min if kind == 'max' else limits.max, dtype=target.dtype)[()]
-        for out_idx in np.ndindex(out_shape):
-            dst = tuple(a + b for a, b in zip(dest, out_idx))
-            value = initial if clear else target.read(dst, node.lineno)
-            for k in range(shape[axis]):
-                index = out_idx[:axis] + (k,) + out_idx[axis:]
-                src = tuple(a + b for a, b in zip(origin, index))
-                with self.budget.at('reduction', node.lineno, axis=axis, index=k, kind_name=kind):
-                    item = source.read(src, node.lineno)
-                    if not self.symbolic and kind in {'max', 'min'} and target.dtype.kind == 'f':
-                        if any(np.isnan(v) or (v == 0 and np.signbit(v)) for v in [item, value]):
-                            raise Unsupported(f'L{node.lineno}: max/min 的 NaN/负零规则尚未支持')
-                    value = apply('add' if kind == 'sum' else kind, [value, item], str(target.dtype))
-            target.write(dst, value, node.lineno)
+        reduce_region(source,target,kind,axis,clear,node.lineno,
+                      lambda buf,idx,value,line:buf.write(idx,value,line),
+                      lambda info:self.reductions.append({'line':node.lineno,**info}))

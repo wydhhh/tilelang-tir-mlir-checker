@@ -13,6 +13,7 @@ try:
 except ImportError:
     np=None
 
+from tests.support.timeouts import regression_timeout
 from tir_mlir_checker import check
 from tir_mlir_checker.trace_io import STAGES
 
@@ -51,12 +52,12 @@ class ExecutionTests(unittest.TestCase):
         self.assertNotEqual(changed,sources[index],name)
         sources[index]=changed
         trace=write_group(self.root/name,sources)
-        result=check(trace,dynamic=True,case=self.short_case,timeout=60)
+        result=check(trace,dynamic=True,case=self.short_case,timeout=regression_timeout(60))
         self.assertNotEqual(result['tool_status'],'input_error',result['diagnostics'])
         return result
 
     def test_where_full_five_stage_nine_case_bitwise_comparison(self):
-        result=check(WHERE,dynamic=True,case=CASE,timeout=60,out_dir=self.root/'report')
+        result=check(WHERE,dynamic=True,case=CASE,timeout=regression_timeout(60, riscv_seconds=1800),out_dir=self.root/'report')
         self.assertEqual(result['tool_status'],'ok',result['dynamic'])
         self.assertEqual(result['semantic_conclusion'],'bounded_checks_passed')
         self.assertEqual(result['dynamic']['case_count'],9)
@@ -135,7 +136,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertTrue(any('parallel' in t.get('reason','') for t in result['dynamic']['tests']))
 
     def test_semantic_only_does_not_claim_numeric_execution(self):
-        result=check(WHERE,semantic=True,case=self.short_case,timeout=60)
+        result=check(WHERE,semantic=True,case=self.short_case,timeout=regression_timeout(60))
         self.assertEqual(result['tool_status'],'ok',result['dynamic'])
         self.assertFalse(result['dynamic']['executed'])
         self.assertEqual(result['dynamic']['tests'],[])
@@ -148,7 +149,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn(before,sources[2])
         sources[2]=sources[2].replace(before,after)
         trace=write_group(self.root/'potential_fault',sources)
-        result=check(trace,semantic=True,case=self.short_case,timeout=60)
+        result=check(trace,semantic=True,case=self.short_case,timeout=regression_timeout(60))
         self.assertEqual(result['summary']['mismatch'],0)
         self.assertFalse(result['dynamic']['has_mismatch'])
         self.assertEqual(result['semantic_conclusion'],'bounded_expressions_unresolved')
@@ -200,7 +201,7 @@ def make_cases(seed):
     b=rng.normal(size=(3,5)).astype(np.float32)
     yield TestCase('sum_and_transpose',(a,b,np.empty_like(a),np.empty((5,3),np.float32)),(2,3),(a+b,a.T.copy()))
 ''')
-        result=check(trace,dynamic=True,case=adapter,timeout=60)
+        result=check(trace,dynamic=True,case=adapter,timeout=regression_timeout(60))
         self.assertEqual(result['tool_status'],'ok',result['dynamic'])
         self.assertEqual(len(result['dynamic']['tests']),10)
         self.assertEqual(result['semantic_conclusion'],'bounded_checks_passed')

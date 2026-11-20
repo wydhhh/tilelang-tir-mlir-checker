@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from fractions import Fraction
 from dataclasses import dataclass, field, replace
 from contextlib import contextmanager
 
 import numpy as np
+
+from .capabilities import TIR_BATCH_SCALARS, TIR_EXTERN_SIGNATURES
 
 
 class Unsupported(ValueError):
@@ -14,11 +18,15 @@ class Unsupported(ValueError):
 
 
 class SemanticFault(ValueError):
-    """Concrete invalid memory/coverage behavior for a supplied test case."""
+    """Concrete violation of the IR execution contract for a supplied test case."""
 
     def __init__(self, message, *, rule_id='MEM-CONTRACT', line=None, **details):
         super().__init__(message)
         self.rule_id, self.line, self.details = rule_id, line, details
+
+
+class LoopBreak(Exception):
+    """Internal statement control signal, caught by the nearest serial For."""
 
 
 def dtype(name):
@@ -64,6 +72,8 @@ class Expr:
     args: tuple
     type: str
     trace: tuple = field(default=(), compare=False, repr=False)
+    # TIR needs unsignedness for dispatch; structural equality uses stored bits.
+    scalar_dtype: str | None = field(default=None, compare=False, repr=False)
 
     def __bool__(self):
         raise Unsupported("符号条件不能作为宿主 Python 布尔值")
@@ -136,7 +146,7 @@ def literal(value, type_name=None):
         raise Unsupported("仅支持标量表达式")
     if type_name is not None:
         value = value.astype(dtype(type_name))
-    return Expr("constant", (value.tobytes().hex(),), storage_type(value.dtype))
+    return Expr("constant", (value.tobytes().hex(),), storage_type(value.dtype), scalar_dtype=value.dtype.name)
 
 
 def apply(op, values, type_name=None):
@@ -148,7 +158,8 @@ def apply(op, values, type_name=None):
             result_type = "i1"
         else:
             result_type = storage_type(dtype(type_name)) if type_name else nodes[0].type
-        return Expr(op, nodes, result_type, merge_trace(nodes))
+        declared = dtype(type_name).name if type_name else nodes[0].scalar_dtype
+        return Expr(op, nodes, result_type, merge_trace(nodes), "bool" if result_type == "i1" else declared)
     operations = {"add": np.add, "sub": np.subtract, "mul": np.multiply,
                   "div": np.divide, "floordiv": np.floor_divide, "mod": np.remainder,
                   "ne": np.not_equal, "eq": np.equal, "lt": np.less, "le": np.less_equal,
@@ -202,8 +213,11 @@ def apply(op, values, type_name=None):
 
 def cast(value, target):
     if isinstance(value, Expr):
-        kind = storage_type(dtype(target))
-        return value if value.type == kind else Expr("cast", (value,), kind, value.trace)
+        declared = dtype(target)
+        kind = storage_type(declared)
+        if value.type == kind:
+            return value if value.scalar_dtype == declared.name else replace(value, scalar_dtype=declared.name)
+        return Expr("cast", (value,), kind, value.trace, declared.name)
     kind = dtype(target)
     scalar = np.asarray(value)
     if scalar.ndim:
@@ -231,8 +245,295 @@ def integer_interpret(value, source, *, unsigned=False):
     return raw if unsigned or raw < 1 << (bits-1) else raw-(1 << bits)
 
 
+def scalar_type(value):
+    if isinstance(value, Expr):
+        return value.scalar_dtype or value.type
+    return np.asarray(value).dtype.name
+
+
+def _float_type(kind):
+    return kind.kind == 'f' or kind.name in {'bfloat16', 'float8_e4m3fn'}
+
+
+def _width(kind):
+    return 1 if kind.kind == 'b' else 8 * kind.itemsize
+
+
+def _integer_result(value, kind):
+    if kind.kind == 'b':
+        return np.bool_(value & 1)
+    return cast(value, kind.name)
+
+
+def _from_bits(bits, kind):
+    return np.asarray(bits, dtype=f'uint{kind.itemsize * 8}').view(kind)[()]
+
+
+def float32_to_half_rz(value):
+    """Truncate binary32 directly to binary16, including subnormals and signed zero."""
+    if isinstance(value,Expr):
+        return Expr('fptrunc_rz',(value,),'f16',value.trace,'float16')
+    raw = int(np.asarray(value,dtype=np.float32).view(np.uint32)[()])
+    sign, exp, frac = (raw >> 16) & 0x8000, (raw >> 23) & 0xff, raw & 0x7fffff
+    power = exp-127
+    if exp == 0xff:
+        # Preserve sign and the leading payload bits; the conversion quiets NaNs.
+        bits = (0x7e00 | (frac >> 13)) if frac else 0x7c00
+    elif power > 15:
+        bits = 0x7bff  # A finite overflow rounds toward the largest finite magnitude.
+    elif power >= -14:
+        bits = ((power+15) << 10) | (frac >> 13)
+    elif power >= -24:
+        bits = (0x800000 | frac) >> (-power-1)
+    else:
+        bits = 0
+    return _from_bits(sign | bits,np.dtype('float16'))
+
+
+def extern_scalar(symbol, values, target, sources):
+    if TIR_EXTERN_SIGNATURES.get(symbol) != (target,tuple(sources)):
+        raise Unsupported(f'tir.call_extern {symbol}: 不支持的符号、参数或 dtype')
+    if len(values) != len(sources) or any(scalar_type(v) not in (kind,'f32') for v,kind in zip(values,sources)):
+        raise Unsupported(f'tir.call_extern {symbol}: 实际参数或 dtype 不符')
+    if symbol == '__float2half_rz':
+        return float32_to_half_rz(values[0])
+    lhs,rhs = values
+    # Match LowerFastFloatDivide's f32 exceptional divisor substitution.
+    infinity,limit = np.float32(np.inf),np.float32(2**126)
+    if isinstance(rhs,Expr):
+        mag = apply('abs',[rhs],'f32')
+        def compare(predicate, other):
+            args = (mag,literal(other))
+            return Expr('cmpf_'+predicate,args,'i1',merge_trace(args))
+        exceptional = apply('and',[compare('ogt',limit),compare('olt',infinity)],'bool')
+        rhs = select(exceptional,scalar_op('copysign',[infinity,rhs],'f32'),rhs)
+    elif limit < abs(rhs) < infinity:
+        rhs = scalar_op('copysign',[infinity,rhs],'f32')
+    return scalar_op('ieee_div',[lhs,rhs],'f32')
+
+
+_FLOAT_FORMATS = {
+    'float16': (5, 10), 'bfloat16': (8, 7), 'float32': (8, 23), 'float64': (11, 52),
+}
+
+
+def _rounded_float(value, kind, negative_zero=False):
+    """Round an exact binary rational once to the destination's IEEE bits."""
+    exponent_bits, fraction_bits = _FLOAT_FORMATS[kind.name]
+    sign = int(value < 0 or (not value and negative_zero))
+    sign_bits = sign << (exponent_bits + fraction_bits)
+    if not value:
+        return _from_bits(sign_bits, kind)
+    numerator, denominator = abs(value.numerator), value.denominator
+    exponent = numerator.bit_length() - denominator.bit_length()
+    if (numerator < denominator << exponent if exponent >= 0
+            else numerator << -exponent < denominator):
+        exponent -= 1
+    bias = (1 << (exponent_bits - 1)) - 1
+    min_exponent = 1 - bias
+    shift = fraction_bits - max(exponent, min_exponent)
+    if shift >= 0:
+        numerator <<= shift
+    else:
+        denominator <<= -shift
+    significand, remainder = divmod(numerator, denominator)
+    if 2 * remainder > denominator or (2 * remainder == denominator and significand & 1):
+        significand += 1
+    if exponent < min_exponent:
+        # Also encodes a subnormal rounding up to the smallest normal.
+        return _from_bits(sign_bits | significand, kind)
+    if significand == 1 << (fraction_bits + 1):
+        significand >>= 1
+        exponent += 1
+    encoded_exponent = exponent + bias
+    if encoded_exponent >= (1 << exponent_bits) - 1:
+        return _from_bits(sign_bits | (((1 << exponent_bits) - 1) << fraction_bits), kind)
+    return _from_bits(sign_bits | (encoded_exponent << fraction_bits)
+                      | (significand - (1 << fraction_bits)), kind)
+
+
+def _fused_multiply_add(a, b, c, kind):
+    # Widening these input formats to binary64 is exact. The finite product
+    # and sum are rational, even on Python versions without math.fma. Never
+    # round via a binary64 result on the way to f32, f16 or bf16.
+    a, b, c = map(float, (a, b, c))
+    if any(map(math.isnan, (a, b, c))):
+        return cast(math.nan, kind.name)  # IEEE does not fix the NaN payload here.
+    product_negative = (math.copysign(1, a) != math.copysign(1, b))
+    if math.isinf(a) or math.isinf(b):
+        if a == 0 or b == 0 or (math.isinf(c) and (c < 0) != product_negative):
+            return cast(math.nan, kind.name)
+        return cast(-math.inf if product_negative else math.inf, kind.name)
+    if math.isinf(c):
+        return cast(c, kind.name)
+    exact = Fraction(a) * Fraction(b) + Fraction(c)
+    negative_zero = (a == 0 or b == 0) and product_negative and c == 0 and math.copysign(1, c) < 0
+    return _rounded_float(exact, kind, negative_zero)
+
+
+def _round_away(value):
+    value = float(value)
+    if not math.isfinite(value):
+        return value
+    fraction, integral = math.modf(abs(value))
+    # floor(abs(x) + 0.5) rounds the addition first and gets inputs just
+    # below 0.5 wrong. Compare the exact fractional part instead.
+    return math.copysign(integral + (fraction >= 0.5), value)
+
+
+_FLOAT_UNARY = {
+    'log2': np.log2, 'erf': math.erf, 'floor': np.floor, 'trunc': np.trunc,
+    'sin': np.sin, 'cos': np.cos, 'roundaway': _round_away, 'roundeven': np.rint,
+    'ceil': np.ceil, 'log1p': np.log1p, 'isnan': np.isnan, 'isfinite': np.isfinite,
+}
+_INTEGER_UNARY = {'bitnot', 'ctpop', 'ctlz'}
+_INTEGER_BINARY = {'bitand', 'bitor', 'bitxor', 'shl', 'ashr', 'lshr',
+                   'sdiv', 'udiv', 'urem', 'smin', 'smax', 'umin', 'umax', 'ipow', 'upow'}
+_FLOAT_BINARY = {'fmod', 'copysign', 'powf', 'ieee_div'}
+_SCALAR_ARITY = {**dict.fromkeys(set(_FLOAT_UNARY) | _INTEGER_UNARY | {'bitcast'}, 1),
+                 **dict.fromkeys(_INTEGER_BINARY | _FLOAT_BINARY, 2), 'fma': 3, 'infinity': 0}
+
+
+def scalar_op(op, values, target, sources=None):
+    """Execute a typed Batch 1 scalar op or construct its shared symbolic node."""
+    if op not in _SCALAR_ARITY or len(values) != _SCALAR_ARITY[op]:
+        raise Unsupported(f'{op}: 未支持的标量运算或参数数量')
+    result = dtype(target)
+    source = tuple(map(dtype, sources if sources is not None else map(scalar_type, values)))
+    if len(source) != len(values):
+        raise Unsupported(f'{op}: 源类型数量与参数不同')
+
+    integer = op in _INTEGER_UNARY or op in _INTEGER_BINARY
+    predicates = {'isnan', 'isfinite'}
+    if op == 'infinity':
+        if result.name not in _FLOAT_FORMATS:
+            raise Unsupported('infinity 需要可表示无穷大的浮点类型')
+        return cast(math.inf, target)
+    if op == 'bitcast':
+        if _width(result) != _width(source[0]):
+            raise Unsupported('bitcast/reinterpret 需要相同的源和目标位宽')
+    elif integer:
+        if result.kind not in 'biu' or any(d.kind not in 'biu' for d in source):
+            raise Unsupported(f'{op}: 需要标量整数位类型')
+        bit_types = source[:1] if op in {'shl', 'ashr', 'lshr'} else source
+        if op not in {'ctpop', 'ctlz'} and any(_width(d) != _width(result) for d in bit_types):
+            raise Unsupported(f'{op}: 源与目标位宽不同')
+    else:
+        if not all(map(_float_type, source)) or (result.kind != 'b' if op in predicates else not _float_type(result)):
+            raise Unsupported(f'{op}: 源或目标浮点类型不受支持')
+        if op == 'fma' and (result.name not in _FLOAT_FORMATS or any(d != result for d in source)):
+            raise Unsupported('fma 仅支持相同类型的 f16/bf16/f32/f64 标量；FP8 融合舍入未实现')
+        if op in {'copysign', 'ieee_div', 'powf', 'fmod'} and any(d != result for d in source):
+            raise Unsupported(f'{op} 需要同类型浮点标量')
+
+    normalized = tuple(value if isinstance(value, Expr) else
+                       (_integer_result(int(value), kind) if kind.kind in 'biu'
+                        else cast(value, kind.name))
+                       for value, kind in zip(values, source))
+    if op in {'shl', 'ashr', 'lshr'} and not isinstance(normalized[1], Expr):
+        amount = int(normalized[1])
+        if not 0 <= amount < _width(result):
+            raise SemanticFault('移位量超出目标位宽', rule_id='ARITH-INVALID-SHIFT',
+                                shift=amount, bitwidth=_width(result))
+    if op in {'sdiv', 'udiv', 'urem'} and not isinstance(normalized[1], Expr):
+        divisor = integer_interpret(normalized[1], source[1].name, unsigned=op != 'sdiv')
+        if not divisor:
+            raise SemanticFault('整数除法或取余除零', rule_id='ARITH-INVALID-DIVISION')
+    if any(isinstance(v, Expr) for v in normalized):
+        nodes = tuple(literal(v) for v in normalized)
+        # Arithmetic and bitwise AND/OR coincide for scalar i1.
+        expr_op = {'bitand': 'and', 'bitor': 'or'}.get(op, op) if result.kind == 'b' else ('div' if op == 'ieee_div' else op)
+        return Expr(expr_op, nodes, storage_type(result), merge_trace(nodes), result.name)
+
+    if integer:
+        a = integer_interpret(normalized[0], source[0].name, unsigned=op not in {'ashr', 'sdiv', 'smin', 'smax', 'ipow'})
+        if op in _INTEGER_UNARY:
+            value = a.bit_count() if op == 'ctpop' else _width(source[0])-a.bit_length() if op == 'ctlz' else ~a
+            return _integer_result(value, result)
+        b = integer_interpret(normalized[1], source[1].name, unsigned=op not in {'sdiv', 'smin', 'smax', 'ipow'})
+        if op == 'sdiv':
+            if a == -(1 << (_width(result) - 1)) and b == -1:
+                raise SemanticFault('有符号最小值除以 -1 溢出', rule_id='ARITH-INVALID-DIVISION')
+            output = (abs(a) // abs(b)) * (-1 if (a < 0) != (b < 0) else 1)
+        elif op in {'ipow', 'upow'}:
+            if b < 0:
+                if not a:
+                    raise SemanticFault('零的负整数次幂', rule_id='ARITH-INVALID-DIVISION')
+                # Only 1 and -1 have nonzero integer reciprocals.
+                output = 1 if a == 1 else (-1 if b % 2 else 1) if a == -1 else 0
+            else:
+                output = pow(a, b, 1 << _width(result))
+        else:
+            output = {'bitand': lambda: a & b, 'bitor': lambda: a | b, 'bitxor': lambda: a ^ b,
+                      'shl': lambda: a << b, 'ashr': lambda: a >> b, 'lshr': lambda: a >> b,
+                      'udiv': lambda: a // b, 'urem': lambda: a % b,
+                      'smin': lambda: min(a, b), 'umin': lambda: min(a, b),
+                      'smax': lambda: max(a, b), 'umax': lambda: max(a, b)}[op]()
+        return _integer_result(output, result)
+    if op == 'bitcast':
+        return np.asarray(normalized[0], dtype=source[0]).view(result)[()]
+    if op == 'fma':
+        return _fused_multiply_add(*normalized, result)
+    if op == 'copysign':
+        # Preserve the magnitude operand's NaN payload as well as signed zeros.
+        bits = np.dtype(f'uint{result.itemsize * 8}')
+        magnitude, sign_source = (int(np.asarray(v).view(bits)[()]) for v in normalized)
+        sign = 1 << (_width(result) - 1)
+        return _from_bits((magnitude & (sign - 1)) | (sign_source & sign), result)
+    with np.errstate(all='ignore'):
+        fn = _FLOAT_UNARY.get(op) or {'fmod': np.fmod, 'powf': np.power, 'ieee_div': np.divide}[op]
+        return cast(fn(*normalized), target)
+
+
+def tir_scalar(operation, values, target, sources=None):
+    """Apply TIR's declared types and the literal control arguments of its calls."""
+    op = TIR_BATCH_SCALARS[operation]
+    if op == 'infinity':
+        # The RISC-V lowerer accepts either no operands or one StringImm hint.
+        # The Call's result dtype, not the hint, determines the constant bits.
+        if len(values) > 1 or (values and not isinstance(values[0], str)):
+            raise Unsupported(f'{operation} 仅接受可选的类型字符串')
+        return scalar_op(op, [], target)
+    if op in {'ieee_div', 'fma'}:
+        if len(values) != _SCALAR_ARITY[op] + 1 or not isinstance(values[-1], str) or values[-1] != 'rn':
+            raise Unsupported(f'{operation} 仅支持字面量舍入模式 rn')
+        if dtype(target).name not in {'float32', 'float64'}:
+            raise Unsupported(f'{operation} 仅支持 float32/float64')
+        values = values[:-1]
+        sources = None if sources is None else sources[:-1]
+    kinds = tuple(sources if sources is not None else map(scalar_type, values))
+    if op == 'ashr' and kinds and dtype(kinds[0]).kind == 'u':
+        op = 'lshr'
+    if op == 'powf' and len(kinds) == 2 and not all(_float_type(dtype(k)) for k in kinds):
+        if all(dtype(k).kind in 'iu' for k in kinds):
+            if any(dtype(k) != dtype(target) for k in kinds):
+                raise Unsupported('tir.pow 的整数底数、指数和结果需要同类型')
+            op = 'upow' if dtype(target).kind == 'u' else 'ipow'
+        else:
+            raise Unsupported('tir.pow 的混合浮点底数/整数指数需要 math.fpowi 语义')
+    return scalar_op(op, values, target, kinds)
+
+
 def mlir_cast(operation, value, source, target):
-    """Default-RNE float casts and explicit sign/zero extension of MLIR bits."""
+    """Typed MLIR casts, including checked truncation from float to integer."""
+    if operation in {'fptosi', 'fptoui'}:
+        src, dst = dtype(source), dtype(target)
+        if not _float_type(src) or dst.kind not in 'biu' or target == 'index':
+            raise Unsupported(f'{operation} 需要标量浮点源和整型目标')
+        if isinstance(value, Expr):
+            return Expr(operation, (value,), storage_type(dst), value.trace, dst.name)
+        raw = float(cast(value, src.name))
+        width = _width(dst)
+        signed = operation == 'fptosi'
+        lo,hi = (-(1 << (width-1)), (1 << (width-1))-1) if signed else (0,(1 << width)-1)
+        truncated = math.trunc(raw) if math.isfinite(raw) else None
+        if truncated is None or not lo <= truncated <= hi:
+            raise SemanticFault(f'{operation}：输入非有限值或截断结果超出范围',
+                                rule_id='ARITH-INVALID-CAST', operation=operation,
+                                target_bits=width)
+        return _integer_result(truncated, dst)
+    if operation == 'bitcast':
+        return scalar_op('bitcast', [value], target, [source])
     if operation in {'extui','extsi','uitofp','sitofp','index_cast','index_castui'}:
         value = integer_interpret(value, source, unsigned=operation in {'extui','uitofp','index_castui'})
     elif operation == 'trunci':
@@ -268,12 +569,31 @@ def mlir_cmpi(predicate, left, right, source):
     return apply(operation, values)
 
 
+MLIR_CMPF_PREDICATES = ('false','oeq','ogt','oge','olt','ole','one','ord',
+                        'ueq','ugt','uge','ult','ule','une','uno','true')
+
+
+def mlir_cmpf(predicate, left, right):
+    if predicate not in MLIR_CMPF_PREDICATES:
+        raise Unsupported(f'未知浮点比较谓词 {predicate}')
+    if isinstance(left, Expr) or isinstance(right, Expr):
+        nodes = (literal(left), literal(right))
+        return Expr('cmpf_'+predicate, nodes, 'i1', merge_trace(nodes))
+    unordered = bool(np.isnan(left) or np.isnan(right))
+    special = {'false':False, 'true':True, 'ord':not unordered, 'uno':unordered}
+    if predicate in special:
+        return np.bool_(special[predicate])
+    result = apply(predicate[1:], [left,right])
+    return np.bool_(unordered or result if predicate[0]=='u' else not unordered and result)
+
+
 def select(condition, yes, no):
     if isinstance(condition, Expr):
         a, b = literal(yes), literal(no)
         if a.type != b.type:
             raise Unsupported("选择分支类型不同")
-        return Expr("select", (condition, a, b), a.type, merge_trace((condition, a, b)))
+        return Expr("select", (condition, a, b), a.type, merge_trace((condition, a, b)),
+                    a.scalar_dtype if a.scalar_dtype == b.scalar_dtype else None)
     return yes if bool(condition) else no
 
 
@@ -330,6 +650,11 @@ class Buffer:
             self.values.fill(0)
         self.dtype = self.values.dtype
         self.shape = self.values.shape
+        self.root = self
+        self.element_offset = 0
+        # NumPy may report all-zero strides for empty allocations. The memref
+        # descriptor still has the logical strides of an identity layout.
+        self.element_strides = tuple(math.prod(self.shape[i+1:]) for i in range(len(self.shape)))
         self.budget = budget
         self.budget.shape(self.shape)
         self.initialized = np.full(self.shape, initialized, dtype=bool)
@@ -343,10 +668,12 @@ class Buffer:
         if symbolic:
             self.expressions = np.empty(self.shape, dtype=object)
             for index in np.ndindex(self.shape):
-                self.expressions[index] = (Expr("input", (position, index), storage_type(self.dtype))
+                self.expressions[index] = (Expr("input", (position, index), storage_type(self.dtype), scalar_dtype=self.dtype.name)
                                            if initialized else None)
 
     def subview(self, offsets, sizes, strides, dropped=()):
+        offsets, sizes, strides = (tuple(map(concrete_index,part))
+                                   for part in (offsets,sizes,strides))
         if not (len(offsets)==len(sizes)==len(strides)==len(self.shape)):
             raise Unsupported("subview rank 不同")
         for a,n,k,b in zip(offsets,sizes,strides,self.shape):
@@ -354,16 +681,52 @@ class Buffer:
                 self.fault('MEM-OUT-OF-BOUNDS','subview 区域越界',0,tuple(offsets))
         if any(sizes[i]!=1 for i in dropped):
             raise Unsupported("只能降掉 size=1 的 subview 维度")
-        index=tuple(slice(a,a+n*k,k) for a,n,k in zip(offsets,sizes,strides))
+        offset = self.element_offset + sum(a*s for a,s in zip(offsets,self.element_strides))
+        shape = tuple(n for i,n in enumerate(sizes) if i not in dropped)
+        steps = tuple(s*k for i,(s,k) in enumerate(zip(self.element_strides,strides)) if i not in dropped)
+        return self._shared_view(offset, shape, steps)
+
+    def reinterpret_cast(self, offset, sizes, strides, *, element_type=None, line=0):
+        """Build a descriptor relative to the root allocation, not this view."""
+        if element_type is not None and storage_type(dtype(element_type)) != storage_type(self.dtype):
+            raise Unsupported('reinterpret_cast 不能改变元素类型')
+        offset, sizes, strides = (concrete_index(offset),
+                                  tuple(map(concrete_index, sizes)),
+                                  tuple(map(concrete_index, strides)))
+        if len(sizes) != len(strides) or offset < 0 or any(n < 0 for n in sizes) or any(s <= 0 for s in strides):
+            raise Unsupported('reinterpret_cast 需要非负 offset/size、正 stride 及匹配的 rank')
+        self.budget.shape(sizes)
+        if 0 not in sizes:
+            last = offset + sum((n-1)*s for n,s in zip(sizes,strides))
+            if last >= self.root.values.size:
+                self.fault('MEM-OUT-OF-BOUNDS', 'reinterpret_cast 超出根缓冲区', line, (last,),
+                           root_elements=self.root.values.size, element_offset=offset)
+        return self._shared_view(offset, sizes, strides)
+
+    def _shared_view(self, offset, sizes, strides):
         result=object.__new__(Buffer)
         result.__dict__=dict(self.__dict__)
+        # An empty view accesses no address. Preserve its logical descriptor,
+        # but do not form an out-of-allocation pointer in the NumPy adapter.
+        physical_offset = 0 if 0 in sizes else offset
         for attr in ['values','initialized','writes','last_lines','expressions']:
-            arr=getattr(self,attr)
-            setattr(result,attr,None if arr is None else np.squeeze(arr[index],axis=tuple(dropped)))
-        result.shape=result.values.shape
-        result._parent=self
-        result._offsets=tuple(offsets);result._strides=tuple(strides);result._dropped=tuple(dropped)
+            arr=getattr(self.root,attr)
+            try:
+                view = None if arr is None else np.ndarray(
+                    sizes, dtype=arr.dtype, buffer=arr,
+                    offset=physical_offset * arr.itemsize,
+                    strides=tuple(s * arr.itemsize for s in strides))
+            except (ValueError, OverflowError) as exc:
+                raise Unsupported('不能构造该 memref 共享视图') from exc
+            setattr(result,attr,view)
+        result.shape, result.element_offset, result.element_strides = sizes, offset, strides
         return result
+
+    def root_index(self, index):
+        if self is self.root:
+            return tuple(map(int,index))
+        flat = self.element_offset + sum(int(i)*s for i,s in zip(index,self.element_strides))
+        return tuple(map(int,np.unravel_index(flat,self.root.shape)))
 
     def fault(self, rule_id, message, line, index, **details):
         raise SemanticFault(f'L{line}: {message}', rule_id=rule_id, line=line,
@@ -407,10 +770,10 @@ class Buffer:
         self.last_lines[index] = line
 
     def access(self,index,write,line):
-        if hasattr(self,'_parent'):
-            iterator=iter(index)
-            parent_index=tuple(a if i in self._dropped else a+next(iterator)*s for i,(a,s) in enumerate(zip(self._offsets,self._strides)))
-            return self._parent.access(parent_index,write,line)
+        if not self.budget.parallel:
+            return
+        if self is not self.root:
+            return self.root.access(self.root_index(index),write,line)
         for region,iteration in self.budget.parallel:
             record=self.accesses.setdefault(region,{}).setdefault(index,{'writer':None,'readers':set(), 'last_line':None})
             if (record['writer'] is not None and record['writer']!=iteration
@@ -431,6 +794,14 @@ class Buffer:
                 "unwritten": int(np.count_nonzero(self.writes == 0)),
                 "multiply_written": int(np.count_nonzero(self.writes > 1)),
                 "writer_lines": sorted(set(int(v) for v in self.last_lines.flat if v))}
+
+
+def concrete_index(value):
+    if isinstance(value,Expr):
+        raise Unsupported('尚不支持数据相关符号下标、尺寸或步长；可单独执行具体输入')
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise Unsupported('需要具体整数下标、尺寸或步长')
+    return int(value)
 
 
 def make_buffers(arguments, outputs, symbolic, budget, inouts=()):

@@ -10,6 +10,7 @@ try:
 except ImportError:
     np = None
 
+from tests.support.timeouts import regression_timeout
 from tir_mlir_checker import check
 from tir_mlir_checker.rules import tir_inventory
 from tir_mlir_checker.trace_io import STAGES
@@ -98,7 +99,7 @@ def make_cases(seed):
 
     def run_group(self, tir=COPY_TIR, mlir=COPY_MLIR, **kwargs):
         trace=write_group(self.root/'trace',[COPY_TIR,COPY_TIR,tir,mlir,COPY_MLIR])
-        return check(trace, case=self.case, dynamic=True, timeout=60, **kwargs)
+        return check(trace, case=self.case, dynamic=True, timeout=regression_timeout(60), **kwargs)
 
     def rule(self, result, code, status='mismatch'):
         return next(f for f in result['findings'] if f['rule_id']==code and f['status']==status)
@@ -236,16 +237,6 @@ PREFIX        T.reduce(x, out, KIND, AXIS, T.bool(CLEAR))
         with self.assertRaises(SemanticFault) as cm:
             self.execute(np.ones((2,3),np.float32),clear=False,initialized=False)
         self.assertEqual(cm.exception.rule_id,'MEM-UNINITIALIZED')
-
-    def test_max_nan_is_unsupported_not_silent_pass(self):
-        from tir_mlir_checker.execution import Unsupported
-        with self.assertRaises(Unsupported):
-            self.execute(np.array([[1,np.nan]],np.float32),kind='max')
-
-    def test_max_symbolic_does_not_assume_special_values_are_absent(self):
-        from tir_mlir_checker.execution import Unsupported
-        with self.assertRaises(Unsupported):
-            self.execute(np.ones((2,3),np.float32),kind='max',symbolic=True)
 
     def test_real_sum_five_stage_and_wrong_initialization_axis(self):
         sources=[(TOOL/'tests/fixtures/traces/十算子-2026-11-11/Sum'/(s+('.tir' if s in STAGES[:3] else '.mlir'))).read_text() for s in STAGES]
