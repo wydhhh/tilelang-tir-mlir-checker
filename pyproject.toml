@@ -15,6 +15,7 @@ execution = ["numpy>=1.24", "ml_dtypes>=0.5"]
 
 [project.scripts]
 tir-mlir-check = "tir_mlir_checker.cli:main"
+tir-mlir-dialect = "tir_mlir_checker.dialect.cli:main"
 
 [tool.setuptools]
-packages = ["tir_mlir_checker"]
+packages = ["tir_mlir_checker", "tir_mlir_checker.dialect"]
